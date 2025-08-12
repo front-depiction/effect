@@ -8926,7 +8926,6 @@ const makeClass = <Fields extends Struct.Fields>(
   })
 
   const transformationSurrogate = schema.annotations({
-    [AST.JSONIdentifierAnnotationId]: identifier,
     ...encodedAnnotations,
     ...typeAnnotations,
     ...transformationAnnotations
@@ -9281,8 +9280,6 @@ const CauseInterruptEncoded = Struct({
   fiberId: FiberIdEncoded
 })
 
-let causeEncodedId = 0
-
 const causeEncoded = <E extends Schema.All, D extends Schema.All>(
   error: E,
   defect: D
@@ -9314,8 +9311,7 @@ const causeEncoded = <E extends Schema.All, D extends Schema.All>(
       right: suspended
     })
   ).annotations({
-    title: `CauseEncoded<${format(error)}>`,
-    [AST.JSONIdentifierAnnotationId]: `CauseEncoded${causeEncodedId++}`
+    title: `CauseEncoded<${format(error)}>`
   })
   return out
 }

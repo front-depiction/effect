@@ -787,7 +787,6 @@ details: Cannot encode Symbol(effect/Schema/test/a) key to JSON Schema`
 
   it("Never", () => {
     const jsonSchema: Root = {
-      "$id": "/schemas/never",
       "not": {},
       "title": "never"
     }
@@ -812,7 +811,6 @@ details: Cannot encode Symbol(effect/Schema/test/a) key to JSON Schema`
 
   it("Object", () => {
     const jsonSchema: Root = {
-      "$id": "/schemas/object",
       "anyOf": [
         { "type": "object" },
         { "type": "array" }
@@ -834,7 +832,6 @@ details: Cannot encode Symbol(effect/Schema/test/a) key to JSON Schema`
   it("empty struct: Schema.Struct({})", () => {
     const schema = Schema.Struct({})
     const jsonSchema: Root = {
-      "$id": "/schemas/%7B%7D",
       "anyOf": [{
         "type": "object"
       }, {
