@@ -1206,6 +1206,25 @@ export const difference: {
 })
 
 /**
+ * Returns a new record containing only the keys where the values differ
+ * between two input records. Only overlapping keys are compared.
+ * Uses `Equal.equals` from Effect-TS for structural equality.
+ */
+export const valueDifference: {
+  <K1 extends string, A, K2 extends string, B>(
+    that: Record<K1, A>,
+  ): (self: Record<K2, B>) => Record<K1 | K2, A | B>;
+  <K1 extends string, A, K2 extends string, B>(
+    self: Record<K1, A>,
+    that: Record<K2, B>,
+  ): Record<K1 | K2, A | B>;
+} = dual(2, (self, that) =>
+  filter(
+    intersection(self, that, (a, _) => a),
+    (value, key) => Record.has(that, key) && !Equal.equals(value, that[key]),
+  )
+
+/**
  * Create an `Equivalence` for records using the provided `Equivalence` for values.
  *
  * @category instances
