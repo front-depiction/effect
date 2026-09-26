@@ -3,10 +3,20 @@ import type * as Cause from "../../Cause.ts"
 import type * as Effect from "../../Effect.ts"
 import type * as Exit from "../../Exit.ts"
 import type * as SchemaAST from "../../SchemaAST.ts"
+import type * as SchemaGetter from "../../SchemaGetter.ts"
 import * as SchemaIssue from "../../SchemaIssue.ts"
 import type { Parser } from "../../SchemaParser.ts"
 import { causeDie, causeEmpty, exitFail, exitFailCause, exitSucceed } from "../core.ts"
-import { causeMap, effectIsExit, exit as exitEffect, flatMap, suspend } from "../effect.ts"
+import {
+  catchCause,
+  causeMap,
+  effectIsExit,
+  exit as exitEffect,
+  failCauseSync,
+  findError,
+  flatMap,
+  suspend
+} from "../effect.ts"
 import * as InternalRecord from "../record.ts"
 import { getSchemaIssue } from "./cause.ts"
 import { collectIssues } from "./checks.ts"
@@ -559,6 +569,7 @@ const foreignKind: Kind<ForeignPayload> = { enter: enterForeign }
 /** @internal */
 export interface Resolver {
   readonly node: (ast: SchemaAST.AST) => Node<unknown>
+  readonly local: (ast: SchemaAST.AST) => Parser
   readonly whole: (ast: SchemaAST.AST) => Parser
 }
 
@@ -615,7 +626,7 @@ export const enumNode = (ast: SchemaAST.Enum): Node<unknown> =>
 
 /** @internal */
 export function objectsNode(ast: SchemaAST.Objects, resolver: Resolver): Node<unknown> {
-  if (ast.indexSignatures.length > 0) return foreign(ast, () => resolver.whole(ast))
+  if (ast.indexSignatures.length > 0) return foreign(ast, () => resolver.local(ast))
   if (ast.propertySignatures.length === 0) return node(notNullishKind, ast, undefined)
   return new Node(structKind, ast, ast.checks, ast.encodingChecks, {
     objects: ast,
@@ -658,6 +669,23 @@ export const suspendNode = (ast: SchemaAST.Suspend, resolver: Resolver): Node<un
 export function declarationNode(ast: SchemaAST.Declaration, resolver: Resolver): Node<unknown> {
   for (const parameter of ast.typeParameters) resolver.node(parameter)
   return new Node(declarationKind, ast, ast.checks, ast.encodingChecks, { declaration: ast, run: undefined })
+}
+
+/** @internal */
+export const templateNode = (ast: SchemaAST.TemplateLiteral, inner: Node<unknown>): Node<unknown> =>
+  node(templateKind, ast, inner)
+
+/** @internal */
+export function linkNode(ast: SchemaAST.AST, encoding: SchemaAST.Encoding, resolver: Resolver): Node<unknown> {
+  const steps: Array<Getter> = []
+  for (const link of encoding) {
+    const transformation = link.transformation
+    if (transformation._tag === "Middleware") return foreign(ast, () => resolver.whole(ast))
+    steps.push(transformation.decode)
+  }
+  const local = ast.getNode(resolver)
+  if (!(local instanceof Node)) return local
+  return new Node(linkKind, ast, undefined, undefined, { steps, links: encoding, resolver, parsers: undefined, local })
 }
 
 interface StructPayload {
@@ -1010,3 +1038,151 @@ function resolveRun(p: DeclarationPayload): ReturnType<SchemaAST.Declaration["ru
 }
 
 const declarationKind: Kind<DeclarationPayload> = { enter: enterDeclaration }
+
+function enterTemplate(node: Node<Node<unknown>>, input: unknown): Step {
+  if (input === InternalParser.missing) return succeed(input)
+  push(templateFrame, node, input, undefined, 0, 0, 0)
+  return enterChild(node.p, input)
+}
+
+const templateKind: Kind<Node<unknown>> = { enter: enterTemplate }
+
+const templateFrame: FrameKind<Node<unknown>, unknown, undefined> = {
+  resume(frame) {
+    const node = frame.node
+    const input = frame.input
+    pop()
+    if (rStatus === OK) return complete(node, input, input)
+    if (rStatus === ISSUE && rIssue !== undefined) {
+      return failIssue(new SchemaIssue.Composite(node.ast, [rIssue], input, rOptions))
+    }
+    const error = findError(rCause)
+    if (error._tag === "Failure") return DONE
+    return failIssue(new SchemaIssue.Composite(node.ast, [error.success], input, rOptions))
+  },
+  copy: identity
+}
+
+type Getter = SchemaGetter.Getter<unknown, unknown, unknown>
+
+interface LinkPayload {
+  readonly steps: ReadonlyArray<Getter>
+  readonly links: SchemaAST.Encoding
+  readonly resolver: Resolver
+  parsers: ReadonlyArray<Node<unknown>> | undefined
+  readonly local: Node<unknown>
+}
+
+function linkParsers(p: LinkPayload): ReadonlyArray<Node<unknown>> {
+  return p.parsers ?? resolveLinkParsers(p)
+}
+
+function resolveLinkParsers(p: LinkPayload): ReadonlyArray<Node<unknown>> {
+  const resolver = p.resolver
+  return p.parsers = p.links.map((link) => resolver.node(link.to))
+}
+
+function enterLink(node: Node<LinkPayload>, input: unknown): Step {
+  const parsers = linkParsers(node.p)
+  const last = parsers.length - 1
+  push(linkParseFrame, node, input, undefined, last, 0, 0)
+  return enterChild(parsers[last], input)
+}
+
+const linkKind: Kind<LinkPayload> = { enter: enterLink }
+
+function transformAt(frame: Frame<LinkPayload, unknown, undefined>, i: number): Step {
+  if (rStatus !== OK) return afterStep(frame, i)
+  const getter = frame.node.p.steps[i]
+  const value = rValue
+  switch (getter._tag) {
+    case "Passthrough":
+      return afterStep(frame, i)
+    case "Transform":
+      if (value !== InternalParser.missing) succeed(getter.transform(value))
+      return afterStep(frame, i)
+    case "TransformOptional":
+      deliver(InternalParser.fromOptionExit(getter.transform(InternalParser.toOption(value))), value)
+      return afterStep(frame, i)
+    case "TransformEffect": {
+      if (value === InternalParser.missing) return afterStep(frame, i)
+      const effect = getter.transform(value, rOptions)
+      if (effectIsExit(effect)) {
+        deliver(effect, value)
+        return afterStep(frame, i)
+      }
+      frame.kind = linkEffectFrame
+      return suspendOn(effect)
+    }
+    case "TransformOptionalEffect": {
+      const effect = getter.transform(InternalParser.toOption(value), rOptions)
+      if (effectIsExit(effect)) {
+        if (effect._tag === "Failure") failCause(effect.cause)
+        else deliver(InternalParser.fromOptionExit(effect.value), value)
+        return afterStep(frame, i)
+      }
+      frame.kind = linkEffectFrame
+      return suspendOn(flatMap(effect, InternalParser.fromOptionExit))
+    }
+  }
+}
+
+function afterStep(frame: Frame<LinkPayload, unknown, undefined>, i: number): Step {
+  const node = frame.node
+  if (i !== 0) {
+    frame.i = i - 1
+    if (rStatus === OK) {
+      frame.kind = linkParseFrame
+      return enterChild(linkParsers(node.p)[i - 1], rValue)
+    }
+    return transformAt(frame, i - 1)
+  }
+  if (rStatus === OK) {
+    frame.kind = linkLocalFrame
+    return enterChild(node.p.local, rValue)
+  }
+  frame.kind = linkWrapFrame
+  return suspendOn(wrapEncoding(failureExit(), node.ast, frame.input, rOptions))
+}
+
+function wrapEncoding(
+  failure: Exit.Exit<never, Issue>,
+  ast: SchemaAST.AST,
+  input: unknown,
+  options: SchemaAST.ParseOptions
+): Pending {
+  return catchCause(
+    failure,
+    (cause) => failCauseSync(() => causeMap(cause, (issue) => new SchemaIssue.Encoding(ast, issue, input, options)))
+  )
+}
+
+const linkParseFrame: FrameKind<LinkPayload, unknown, undefined> = {
+  resume(frame) {
+    return transformAt(frame, frame.i)
+  },
+  copy: identity
+}
+
+const linkEffectFrame: FrameKind<LinkPayload, unknown, undefined> = {
+  resume(frame) {
+    return afterStep(frame, frame.i)
+  },
+  copy: identity
+}
+
+const linkLocalFrame: FrameKind<LinkPayload, unknown, undefined> = {
+  resume() {
+    pop()
+    return DONE
+  },
+  copy: identity
+}
+
+const linkWrapFrame: FrameKind<LinkPayload, unknown, undefined> = {
+  resume() {
+    pop()
+    return DONE
+  },
+  copy: identity
+}

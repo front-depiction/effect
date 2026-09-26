@@ -54,6 +54,7 @@ const makeField = (ast: SchemaAST.AST): Parser => Interpreter.compileField(ast, 
 
 const resolver: Machine.Resolver = {
   node: (ast) => resolve(ast).node,
+  local: (ast) => Interpreter.compileLocal(ast, decodeChild),
   whole: (ast) => Interpreter.compile(ast, decodeChild)
 }
 

@@ -435,8 +435,8 @@ export const Link: new(
     this.transformation = transformation
   }
   /** @internal */
-  getNode(ast: AST, _encoding: Encoding, resolver: Machine.Resolver): Machine.Node<unknown> {
-    return Machine.foreign(ast, () => resolver.whole(ast))
+  getNode(ast: AST, encoding: Encoding, resolver: Machine.Resolver): Machine.Node<unknown> {
+    return Machine.linkNode(ast, encoding, resolver)
   }
 }
 
@@ -676,9 +676,7 @@ abstract class ASTNodeImpl implements ASTNode {
   readonly [TypeId] = TypeId
   abstract readonly _tag: string
   /** @internal */
-  getNode(this: AST, resolver: Machine.Resolver): Machine.Node<unknown> {
-    return Machine.foreign(this, () => resolver.whole(this))
-  }
+  abstract getNode(resolver: Machine.Resolver): Machine.Node<unknown>
   readonly annotations: Schema.Annotations.Annotations | undefined
   readonly checks: Checks | undefined
   readonly encoding: Encoding | undefined
@@ -1564,9 +1562,12 @@ export const TemplateLiteral: new(
     this.suffixLengths = suffixLengths
   }
   /** @internal */
+  override getNode(resolver: Machine.Resolver): Machine.Node<unknown> {
+    return Machine.templateNode(this, resolver.node(templateLiteralCodec(this)))
+  }
+  /** @internal */
   getParser(compile: SchemaParser.Compiler): SchemaParser.Parser {
-    const tuple = new Arrays(false, this.parts.map(partFromString), [])
-    const parser = compile(decodeTo(string, tuple, templateLiteralTransformation(this)))
+    const parser = compile(templateLiteralCodec(this))
     return (input, options) => {
       if (input === InternalParser.missing) return InternalParser.missingExit
       const result = parser(input, options)
@@ -1610,6 +1611,11 @@ export function templateLiteralParser(parts: ReadonlyArray<AST>): Arrays {
   const template = new TemplateLiteral(parts.map((part) => normalize(toEncoded(part))))
   const tuple = new Arrays(false, parts.map(partFromString), [])
   return decodeTo(template, tuple, templateLiteralTransformation(template))
+}
+
+/** @internal */
+export function templateLiteralCodec(ast: TemplateLiteral): AST {
+  return decodeTo(string, new Arrays(false, ast.parts.map(partFromString), []), templateLiteralTransformation(ast))
 }
 
 function templateLiteralTransformation(template: TemplateLiteral) {
