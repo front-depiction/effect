@@ -4013,6 +4013,10 @@ export const Suspend: new(
     this.thunk = () => ast ??= thunk()
   }
   /** @internal */
+  override getNode(resolver: Machine.Resolver): Machine.Node<unknown> {
+    return Machine.suspendNode(this, resolver)
+  }
+  /** @internal */
   getParser(compile: SchemaParser.Compiler): SchemaParser.Parser {
     let parser: SchemaParser.Parser
     return (input, options) => (parser ??= compile(this.thunk()))(input, options)

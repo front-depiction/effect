@@ -358,7 +358,7 @@ export function decode(
   const previous = rOptions
   rOptions = options
   const base = sp
-  const signal = drive(decodeLoop, base, enterChild(node, input), previous, root && node.kind !== foreignKind)
+  const signal = drive(decodeLoop, base, enterChild(node, input), previous, root)
   rOptions = previous
   return release(
     signal === DONE && node.kind === foreignKind && rResult !== undefined
@@ -556,9 +556,36 @@ export function objectsNode(ast: SchemaAST.Objects, resolver: Resolver): Node<un
 }
 
 /** @internal */
+export const suspendNode = (ast: SchemaAST.Suspend, resolver: Resolver): Node<unknown> =>
+  node(suspendKind, ast, { thunk: ast.thunk, resolver, target: undefined })
+
+/** @internal */
 export function declarationNode(ast: SchemaAST.Declaration, resolver: Resolver): Node<unknown> {
   for (const parameter of ast.typeParameters) resolver.node(parameter)
   return new Node(declarationKind, ast, ast.checks, ast.encodingChecks, { declaration: ast, run: undefined })
+}
+
+interface SuspendPayload {
+  readonly thunk: () => SchemaAST.AST
+  readonly resolver: Resolver
+  target: Node<unknown> | undefined
+}
+
+function enterSuspend(node: Node<SuspendPayload>, input: unknown): Step {
+  const p = node.p
+  return enterChild(p.target ?? resolveTarget(p), input)
+}
+
+const suspendKind: Kind<SuspendPayload> = { enter: enterSuspend }
+
+function resolveTarget(p: SuspendPayload): Node<unknown> {
+  let target: Node<unknown>
+  try {
+    target = p.resolver.node(p.thunk())
+  } catch (error) {
+    return planned(error)
+  }
+  return p.target = target
 }
 
 interface DeclarationPayload {
