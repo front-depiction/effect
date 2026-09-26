@@ -194,6 +194,10 @@ function add<P, I, O>(frame: Frame<P, I, O>, issue: Issue): void {
   else frame.acc = [issue]
 }
 
+function schemaIssue(): Issue | undefined {
+  return rStatus === ISSUE ? rIssue : getSchemaIssue(rCause)
+}
+
 function failureExit(): Exit.Exit<never, Issue> {
   return rStatus === ISSUE && rIssue !== undefined ? exitFail(rIssue) : exitFailCause(rCause)
 }
@@ -632,6 +636,21 @@ export const arraysNode = (ast: SchemaAST.Arrays, resolver: Resolver): Node<unkn
   })
 
 /** @internal */
+export const unionNode = (
+  ast: SchemaAST.Union,
+  resolver: Resolver,
+  candidates: (types: ReadonlyArray<SchemaAST.AST>) => SchemaAST.CandidateIndex
+): Node<unknown> =>
+  new Node(unionKind, ast, ast.checks, ast.encodingChecks, {
+    union: ast,
+    resolver,
+    candidates,
+    members: [],
+    index: undefined,
+    oneOf: ast.options?.mode === "oneOf"
+  })
+
+/** @internal */
 export const suspendNode = (ast: SchemaAST.Suspend, resolver: Resolver): Node<unknown> =>
   node(suspendKind, ast, { thunk: ast.thunk, resolver, target: undefined })
 
@@ -852,6 +871,94 @@ function resumeArray(frame: Frame<ArrayPayload, Elements, Array<unknown> | undef
 const arrayFrame: FrameKind<ArrayPayload, Elements, Array<unknown> | undefined> = {
   resume: resumeArray,
   copy: (out) => out === undefined ? out : out.slice()
+}
+
+interface UnionPayload {
+  readonly union: SchemaAST.Union
+  readonly resolver: Resolver
+  readonly candidates: (types: ReadonlyArray<SchemaAST.AST>) => SchemaAST.CandidateIndex
+  readonly members: Array<Node<unknown>>
+  index: SchemaAST.CandidateIndex | undefined
+  readonly oneOf: boolean
+}
+
+function member(p: UnionPayload, i: number): Node<unknown> {
+  return p.members[i] ??= p.resolver.node(p.union.types[i])
+}
+
+function enterUnion(node: Node<UnionPayload>, input: unknown): Step {
+  if (input === InternalParser.missing) return succeed(input)
+  const p = node.p
+  const candidates = (p.index ??= p.candidates(p.union.types))(input, false)
+  if (candidates.length === 0) {
+    return failIssue(new SchemaIssue.AnyOf(node.p.union, [], input, rOptions))
+  }
+  if (candidates.length === 1) {
+    push(unionSingleFrame, node, input, undefined, 0, 0, 0)
+    return enterChild(member(p, candidates[0]), input)
+  }
+  push(unionFrame, node, input, candidates, 0, -1, 0)
+  return enterChild(member(p, candidates[0]), input)
+}
+
+const unionKind: Kind<UnionPayload> = { enter: enterUnion }
+
+const unionSingleFrame: FrameKind<UnionPayload, unknown, undefined> = {
+  resume(frame) {
+    const node = frame.node
+    const input = frame.input
+    pop()
+    if (rStatus === OK) return complete(node, input, rValue)
+    const issue = schemaIssue()
+    if (issue === undefined) return DONE
+    return failIssue(new SchemaIssue.AnyOf(node.p.union, [issue], input, rOptions))
+  },
+  copy: identity
+}
+
+function resumeUnion(frame: Frame<UnionPayload, unknown, ReadonlyArray<number>>): Step {
+  const node = frame.node
+  const input = frame.input
+  const options = rOptions
+  const candidates = frame.out
+  const position = candidates[frame.i]
+  if (rStatus === OK) {
+    if (frame.j >= 0) {
+      const types = node.p.union.types
+      const successes = [types[frame.j], types[position]]
+      pop()
+      return failIssue(new SchemaIssue.OneOf(node.p.union, successes, input, options))
+    }
+    if (!node.p.oneOf) {
+      pop()
+      return complete(node, input, rValue)
+    }
+    frame.value = rValue
+    frame.j = position
+  } else {
+    const issue = schemaIssue()
+    if (issue === undefined) {
+      pop()
+      return DONE
+    }
+    add(frame, issue)
+  }
+  const next = frame.i + 1
+  if (next < candidates.length) {
+    frame.i = next
+    return enterChild(member(node.p, candidates[next]), input)
+  }
+  const found = frame.j >= 0
+  const value = frame.value
+  const issues = frame.acc
+  pop()
+  if (found) return complete(node, input, value)
+  return failIssue(new SchemaIssue.AnyOf(node.p.union, issues ?? [], input, options))
+}
+
+const unionFrame: FrameKind<UnionPayload, unknown, ReadonlyArray<number>> = {
+  resume: resumeUnion,
+  copy: identity
 }
 
 interface SuspendPayload {

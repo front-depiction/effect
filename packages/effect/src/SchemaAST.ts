@@ -3740,6 +3740,10 @@ export const Union: new<A extends AST = AST>(
     this.encodingChecks = encodingChecks
   }
   /** @internal */
+  override getNode(resolver: Machine.Resolver): Machine.Node<unknown> {
+    return Machine.unionNode(this, resolver, getCandidateIndex)
+  }
+  /** @internal */
   getParser(
     compile: SchemaParser.Compiler,
     compileField?: SchemaParser.Compiler
