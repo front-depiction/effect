@@ -2,7 +2,9 @@ import * as Effect from "../../Effect.ts"
 import type { CompiledDecoder, Decode, Is, Make } from "../../schema/SchemaCompiler.ts"
 import type * as SchemaAST from "../../SchemaAST.ts"
 import type { Parser } from "../../SchemaParser.ts"
+import { resolveConcurrency } from "../effect.ts"
 import * as Interpreter from "./interpreter.ts"
+import * as Machine from "./machine.ts"
 import * as InternalParser from "./parser.ts"
 
 /** @internal */
@@ -50,6 +52,14 @@ const makeChild = (ast: SchemaAST.AST): Parser =>
     : resolve(ast).makeEffect
 const makeField = (ast: SchemaAST.AST): Parser => Interpreter.compileField(ast, makeChild)
 
+const resolver: Machine.Resolver = {
+  node: (ast) => resolve(ast).node,
+  whole: (ast) => Interpreter.compile(ast, decodeChild)
+}
+
+const isSequential = (options: SchemaAST.ParseOptions): boolean =>
+  options.concurrency === undefined || resolveConcurrency(options.concurrency) === 1
+
 /** @internal */
 export interface Entry {
   readonly ast: SchemaAST.AST
@@ -61,19 +71,52 @@ export interface Entry {
   readonly decodeEffect: Parser
   readonly parser: Parser
   readonly makeEffect: Parser
+  readonly node: Machine.Node<unknown>
+  readonly rootEffect: Parser
 }
 
 class InterpretedEntry implements Entry {
   readonly ast: SchemaAST.AST
   declare private cachedDecodeEffect: Parser | undefined
   declare private cachedMakeEffect: Parser | undefined
+  declare private cachedRootEffect: Parser | undefined
+  declare private cachedNode: Machine.Node<unknown> | undefined
+  declare private cachedPlan: Machine.Node<unknown> | null | undefined
+  declare private cachedClosure: Parser | undefined
 
   constructor(ast: SchemaAST.AST) {
     this.ast = ast
   }
 
+  get plan(): Machine.Node<unknown> | null {
+    if (this.cachedPlan === undefined) this.cachedPlan = Machine.build(this.ast, resolver) ?? null
+    return this.cachedPlan
+  }
+
+  get node(): Machine.Node<unknown> {
+    return this.cachedNode ??= this.plan ?? Machine.foreign(this.ast, () => this.closure)
+  }
+
+  get closure(): Parser {
+    return this.cachedClosure ??= Interpreter.compile(this.ast, decodeChild)
+  }
+
   get decodeEffect(): Parser {
-    return this.cachedDecodeEffect ??= Interpreter.compile(this.ast, decodeChild)
+    return this.cachedDecodeEffect ??= (input, options) => {
+      const plan = this.plan
+      return plan !== null && isSequential(options)
+        ? Machine.decode(plan, input, options, false)
+        : this.closure(input, options)
+    }
+  }
+
+  get rootEffect(): Parser {
+    return this.cachedRootEffect ??= (input, options) => {
+      const plan = this.plan
+      return plan !== null && isSequential(options)
+        ? Machine.decode(plan, input, options, true)
+        : this.closure(input, options)
+    }
   }
 
   get parser(): Parser {
@@ -103,6 +146,14 @@ class CompilerEntry extends InterpretedEntry {
   private operation<K extends DecoderOperation>(key: K): CompiledDecoder[K] | undefined {
     const compiled = this.compiled
     return typeof compiled === "function" ? compiled(this.ast, this.resolve, key) : compiled?.[key]
+  }
+
+  override get node(): Machine.Node<unknown> {
+    return this.save("node", Machine.foreign(this.ast, () => this.parser))
+  }
+
+  override get rootEffect(): Parser {
+    return this.parser
   }
 
   get is(): Is | undefined {

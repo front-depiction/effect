@@ -228,7 +228,7 @@ export function _issue<T>(ast: SchemaAST.AST) {
  */
 export function asserts<S extends Schema.Constraint, I>(schema: S, input: I): asserts input is I & S["Type"] {
   const ast = SchemaAST.toType(schema.ast)
-  const result = CompilerRegistry.resolve(ast).parser(input, SchemaAST.defaultParseOptions)
+  const result = CompilerRegistry.resolve(ast).rootEffect(input, SchemaAST.defaultParseOptions)
   const exit = Effect.runSyncExit(parserResult<S["Type"], never>(result, input))
   if (Exit.isFailure(exit)) {
     const issue = InternalSchemaCause.getSchemaIssueOrThrow(
@@ -1084,7 +1084,9 @@ function makeSyncEntry<T>(
 function makeDetailedSync<T>(
   entry: CompilerRegistry.Entry
 ): (input: unknown, options?: SchemaAST.ParseOptions) => T {
-  return asSync(runWithCompiler<T, never>(() => entry.decodeEffect, entry.ast))
+  return asSync(
+    runWithCompiler<T, never>(() => entry.compiled === undefined ? entry.rootEffect : entry.decodeEffect, entry.ast)
+  )
 }
 
 function asSync<T, E>(
@@ -1149,5 +1151,5 @@ export interface Compiler {
   (ast: SchemaAST.AST): Parser
 }
 
-const normalCompiler: Compiler = (ast) => CompilerRegistry.resolve(ast).parser
+const normalCompiler: Compiler = (ast) => CompilerRegistry.resolve(ast).rootEffect
 const constructorCompiler: Compiler = (ast) => CompilerRegistry.resolve(ast).makeEffect

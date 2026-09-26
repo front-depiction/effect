@@ -21,6 +21,7 @@ import { effectIsExit, iterateConcurrent, iterateEager, resolveConcurrency } fro
 import * as InternalRecord from "./internal/record.ts"
 import * as InternalAnnotations from "./internal/schema/annotations.ts"
 import * as InternalSchemaCause from "./internal/schema/cause.ts"
+import * as Machine from "./internal/schema/machine.ts"
 import * as InternalParser from "./internal/schema/parser.ts"
 import * as Pipeable from "./Pipeable.ts"
 import * as Predicate from "./Predicate.ts"
@@ -402,6 +403,8 @@ export interface Link {
   readonly transformation:
     | SchemaTransformation.Transformation<any, any, any, any>
     | SchemaTransformation.Middleware<any, any, any, any, any, any>
+  /** @internal */
+  getNode(ast: AST, encoding: Encoding, resolver: Machine.Resolver): Machine.Node<unknown>
 }
 
 /**
@@ -429,6 +432,10 @@ export const Link: new(
   ) {
     this.to = to
     this.transformation = transformation
+  }
+  /** @internal */
+  getNode(ast: AST, _encoding: Encoding, resolver: Machine.Resolver): Machine.Node<unknown> {
+    return Machine.foreign(ast, () => resolver.whole(ast))
   }
 }
 
@@ -659,12 +666,18 @@ interface ASTNode {
   readonly checks: Checks | undefined
   readonly encoding: Encoding | undefined
   readonly context: Context | undefined
+  /** @internal */
+  getNode(resolver: Machine.Resolver): Machine.Node<unknown>
   toString(): string
 }
 
 abstract class ASTNodeImpl implements ASTNode {
   readonly [TypeId] = TypeId
   abstract readonly _tag: string
+  /** @internal */
+  getNode(this: AST, resolver: Machine.Resolver): Machine.Node<unknown> {
+    return Machine.foreign(this, () => resolver.whole(this))
+  }
   readonly annotations: Schema.Annotations.Annotations | undefined
   readonly checks: Checks | undefined
   readonly encoding: Encoding | undefined
