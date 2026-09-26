@@ -2378,6 +2378,10 @@ export const Arrays: new(
     }
   }
   /** @internal */
+  override getNode(resolver: Machine.Resolver): Machine.Node<unknown> {
+    return Machine.arraysNode(this, resolver)
+  }
+  /** @internal */
   getParser(
     compile: SchemaParser.Compiler,
     compileField: SchemaParser.Compiler = compile

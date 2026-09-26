@@ -623,6 +623,15 @@ export function objectsNode(ast: SchemaAST.Objects, resolver: Resolver): Node<un
 }
 
 /** @internal */
+export const arraysNode = (ast: SchemaAST.Arrays, resolver: Resolver): Node<unknown> =>
+  new Node(arrayKind, ast, ast.checks, ast.encodingChecks, {
+    arrays: ast,
+    resolver,
+    elements: undefined,
+    rest: undefined
+  })
+
+/** @internal */
 export const suspendNode = (ast: SchemaAST.Suspend, resolver: Resolver): Node<unknown> =>
   node(suspendKind, ast, { thunk: ast.thunk, resolver, target: undefined })
 
@@ -743,6 +752,106 @@ function resumeStruct(frame: Frame<StructPayload, Struct, Struct | undefined>): 
 const structFrame: FrameKind<StructPayload, Struct, Struct | undefined> = {
   resume: resumeStruct,
   copy: copyStruct
+}
+
+interface ArrayPayload {
+  readonly arrays: SchemaAST.Arrays
+  readonly resolver: Resolver
+  elements: ReadonlyArray<Node<unknown>> | undefined
+  rest: ReadonlyArray<Node<unknown>> | undefined
+}
+
+type Elements = ReadonlyArray<unknown>
+
+function enterArray(node: Node<ArrayPayload>, input: unknown): Step {
+  if (input === InternalParser.missing) return succeed(input)
+  push(arrayFrame, node, input, undefined, 0, 0, CATCH | RESTART)
+  if (!Array.isArray(input)) {
+    pop()
+    return invalidType(node, input)
+  }
+  const p = node.p
+  if (p.elements === undefined) {
+    p.elements = p.arrays.elements.map(p.resolver.node)
+    p.rest = p.arrays.rest.map(p.resolver.node)
+  }
+  const len = input.length
+  const top = stack[sp - 1]
+  top.out = new Array(len)
+  top.j = len
+  return element(node, input, 0, len)
+}
+
+const arrayKind: Kind<ArrayPayload> = { enter: enterArray }
+
+function element(node: Node<ArrayPayload>, input: Elements, i: number, len: number): Step {
+  const arrays = node.p.arrays
+  const elementLen = arrays.elements.length
+  const restLen = arrays.rest.length
+  const end = restLen === 0 ? elementLen : Math.max(len, elementLen + Math.max(0, restLen - 1))
+  if (i >= end) return finishArray(node, input, len)
+  const item = input[i]
+  const child = elementAt(node.p, i, len)
+  const value = i < len ? item : InternalParser.missing
+  return enterChild(child, value)
+}
+
+function elementAt(p: ArrayPayload, i: number, len: number): Node<unknown> {
+  const elements = p.elements ?? []
+  const rest = p.rest ?? []
+  const elementLen = elements.length
+  if (i < elementLen) return elements[i]
+  const tailThreshold = Math.max(elementLen, len - Math.max(0, rest.length - 1))
+  return i >= tailThreshold ? rest[i - tailThreshold + 1] : rest[0]
+}
+
+function finishArray(node: Node<ArrayPayload>, input: Elements, len: number): Signal {
+  const options = rOptions
+  const elementLen = node.p.arrays.elements.length
+  const frame = stack[sp - 1]
+  if (node.p.arrays.rest.length === 0 && len > elementLen) {
+    for (let i = elementLen; i < len; i++) {
+      const issue = new SchemaIssue.Pointer([i], new SchemaIssue.UnexpectedKey(node.ast, input[i], options))
+      if (options.errors !== "all") {
+        pop()
+        return failIssue(new SchemaIssue.Composite(node.ast, [issue], input, options))
+      }
+      add(frame, issue)
+    }
+  }
+  const out = frame.out
+  const issues = frame.acc
+  pop()
+  if (issues) return failIssue(new SchemaIssue.Composite(node.ast, issues, input, options))
+  return complete(node, input, out === undefined ? input : out)
+}
+
+function resumeArray(frame: Frame<ArrayPayload, Elements, Array<unknown> | undefined>): Step {
+  const node = frame.node
+  const i = frame.i
+  const len = frame.j
+  if (rStatus === OK) {
+    const value = rValue
+    if (value !== InternalParser.missing) {
+      if (frame.out !== undefined) frame.out[i] = value
+    } else {
+      const child = elementAt(node.p, i, len).ast
+      if (!child.context?.isOptional) {
+        const terminal = missingKey(frame, i, child)
+        if (terminal !== undefined) return terminal
+      }
+    }
+  } else {
+    const terminal = keyFailure(frame, i)
+    if (terminal !== undefined) return terminal
+  }
+  frame.i = i + 1
+  return element(node, frame.input, i + 1, len)
+}
+
+const arrayFrame: FrameKind<ArrayPayload, Elements, Array<unknown> | undefined> = {
+  resume: resumeArray,
+  copy: (out) => out === undefined ? out : out.slice()
 }
 
 interface SuspendPayload {
