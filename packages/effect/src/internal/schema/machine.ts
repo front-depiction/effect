@@ -6,7 +6,9 @@ import type * as SchemaAST from "../../SchemaAST.ts"
 import * as SchemaIssue from "../../SchemaIssue.ts"
 import type { Parser } from "../../SchemaParser.ts"
 import { causeDie, causeEmpty, exitFail, exitFailCause, exitSucceed } from "../core.ts"
-import { effectIsExit, exit as exitEffect, flatMap, suspend } from "../effect.ts"
+import { causeMap, effectIsExit, exit as exitEffect, flatMap, suspend } from "../effect.ts"
+import * as InternalRecord from "../record.ts"
+import { getSchemaIssue } from "./cause.ts"
 import { collectIssues } from "./checks.ts"
 import * as InternalParser from "./parser.ts"
 
@@ -187,6 +189,11 @@ function enterChild(node: Node<unknown>, input: unknown): Step {
   return node
 }
 
+function add<P, I, O>(frame: Frame<P, I, O>, issue: Issue): void {
+  if (frame.acc) frame.acc.push(issue)
+  else frame.acc = [issue]
+}
+
 function failureExit(): Exit.Exit<never, Issue> {
   return rStatus === ISSUE && rIssue !== undefined ? exitFail(rIssue) : exitFailCause(rCause)
 }
@@ -213,6 +220,61 @@ function complete(node: Node<unknown>, input: unknown, value: unknown): Signal {
 
 function invalidType(node: Node<unknown>, input: unknown): Signal {
   return failIssue(new SchemaIssue.InvalidType(node.ast, input, rOptions))
+}
+
+function keyFailure<P, I, O>(frame: Frame<P, I, O>, key: PropertyKey): Signal | undefined {
+  const options = rOptions
+  let issue = rIssue
+  if (rStatus === CAUSE) {
+    const cause = rCause
+    if (cause.reasons.length === 0) {
+      pop()
+      return DONE
+    }
+    issue = getSchemaIssue(cause)
+    if (issue === undefined) {
+      const ast = frame.node.ast
+      const input = frame.input
+      pop()
+      return failCause(pointCause(cause, ast, key, input, options))
+    }
+  }
+  if (issue === undefined) return undefined
+  const pointer = new SchemaIssue.Pointer([key], issue)
+  if (options.errors === "all") {
+    add(frame, pointer)
+    return undefined
+  }
+  const ast = frame.node.ast
+  const input = frame.input
+  pop()
+  return failIssue(new SchemaIssue.Composite(ast, [pointer], input, options))
+}
+
+function pointCause(
+  cause: Cause.Cause<Issue>,
+  ast: SchemaAST.AST,
+  key: PropertyKey,
+  input: unknown,
+  options: SchemaAST.ParseOptions
+): Cause.Cause<Issue> {
+  return causeMap(
+    cause,
+    (issue) => new SchemaIssue.Composite(ast, [new SchemaIssue.Pointer([key], issue)], input, options)
+  )
+}
+
+function missingKey<P, I, O>(frame: Frame<P, I, O>, key: PropertyKey, child: SchemaAST.AST): Signal | undefined {
+  const options = rOptions
+  const issue = new SchemaIssue.Pointer([key], new SchemaIssue.MissingKey(child.context?.annotations))
+  if (options.errors === "all") {
+    add(frame, issue)
+    return undefined
+  }
+  const ast = frame.node.ast
+  const input = frame.input
+  pop()
+  return failIssue(new SchemaIssue.Composite(ast, [issue], input, options))
 }
 
 function decodeLoop(base: number, step: Step): Signal {
@@ -549,10 +611,15 @@ export const enumNode = (ast: SchemaAST.Enum): Node<unknown> =>
 
 /** @internal */
 export function objectsNode(ast: SchemaAST.Objects, resolver: Resolver): Node<unknown> {
-  if (ast.indexSignatures.length > 0 || ast.propertySignatures.length > 0) {
-    return foreign(ast, () => resolver.whole(ast))
-  }
-  return node(notNullishKind, ast, undefined)
+  if (ast.indexSignatures.length > 0) return foreign(ast, () => resolver.whole(ast))
+  if (ast.propertySignatures.length === 0) return node(notNullishKind, ast, undefined)
+  return new Node(structKind, ast, ast.checks, ast.encodingChecks, {
+    objects: ast,
+    resolver,
+    keys: ast.propertySignatures.map((ps) => ps.name),
+    expected: new Set(ast.propertySignatures.map((ps) => typeof ps.name === "number" ? String(ps.name) : ps.name)),
+    children: undefined
+  })
 }
 
 /** @internal */
@@ -563,6 +630,119 @@ export const suspendNode = (ast: SchemaAST.Suspend, resolver: Resolver): Node<un
 export function declarationNode(ast: SchemaAST.Declaration, resolver: Resolver): Node<unknown> {
   for (const parameter of ast.typeParameters) resolver.node(parameter)
   return new Node(declarationKind, ast, ast.checks, ast.encodingChecks, { declaration: ast, run: undefined })
+}
+
+interface StructPayload {
+  readonly objects: SchemaAST.Objects
+  readonly resolver: Resolver
+  readonly keys: ReadonlyArray<PropertyKey>
+  readonly expected: ReadonlySet<PropertyKey>
+  children: ReadonlyArray<Node<unknown>> | undefined
+}
+
+function properties(p: StructPayload): ReadonlyArray<Node<unknown>> {
+  return p.children ?? resolveProperties(p)
+}
+
+function resolveProperties(p: StructPayload): ReadonlyArray<Node<unknown>> {
+  const resolver = p.resolver
+  return p.children = p.objects.propertySignatures.map((ps) => resolver.node(ps.type))
+}
+
+type Struct = Record<PropertyKey, unknown>
+
+const isStruct = (input: unknown): input is Struct =>
+  typeof input === "object" && input !== null && !Array.isArray(input)
+
+function copyStruct(out: Struct | undefined): Struct | undefined {
+  if (out === undefined) return out
+  const copy: Struct = {}
+  for (const key of Reflect.ownKeys(out)) InternalRecord.assignProperty(copy, key, out[key])
+  return copy
+}
+
+function enterStruct(node: Node<StructPayload>, input: unknown): Step {
+  if (input === InternalParser.missing) return succeed(input)
+  const options = rOptions
+  if (options.errors !== "all" && options.onExcessProperty === undefined) {
+    if (!isStruct(input)) return invalidType(node, input)
+    properties(node.p)
+    push(structFrame, node, input, {}, 0, 0, CATCH)
+    return property(node, input, 0)
+  }
+  push(structFrame, node, input, undefined, 0, 0, CATCH | RESTART)
+  if (!isStruct(input)) {
+    pop()
+    return invalidType(node, input)
+  }
+  properties(node.p)
+  stack[sp - 1].out = {}
+  if (options.onExcessProperty === "error") {
+    const expected = node.p.expected
+    const keys = Reflect.ownKeys(input)
+    for (let i = 0; i < keys.length; i++) {
+      const key = keys[i]
+      if (!expected.has(key) && Object.prototype.propertyIsEnumerable.call(input, key)) {
+        const issue = new SchemaIssue.Pointer([key], new SchemaIssue.UnexpectedKey(node.ast, input[key], options))
+        if (options.errors !== "all") {
+          pop()
+          return failIssue(new SchemaIssue.Composite(node.ast, [issue], input, options))
+        }
+        add(stack[sp - 1], issue)
+      }
+    }
+  }
+  return property(node, input, 0)
+}
+
+const structKind: Kind<StructPayload> = { enter: enterStruct }
+
+function property(node: Node<StructPayload>, input: Struct, i: number): Step {
+  const keys = node.p.keys
+  if (i === keys.length) return finishStruct()
+  const key = keys[i]
+  const child = properties(node.p)[i]
+  const value = (key === "__proto__" ? Object.hasOwn(input, key) : key in input) ? input[key] : InternalParser.missing
+  return enterChild(child, value)
+}
+
+function finishStruct(): Signal {
+  const frame = stack[sp - 1]
+  const node = frame.node
+  const input = frame.input
+  const out = frame.out
+  const issues = frame.acc
+  pop()
+  if (issues) return failIssue(new SchemaIssue.Composite(node.ast, issues, input, rOptions))
+  return complete(node, input, out === undefined ? input : out)
+}
+
+function resumeStruct(frame: Frame<StructPayload, Struct, Struct | undefined>): Step {
+  const node = frame.node
+  const i = frame.i
+  const key = node.p.keys[i]
+  if (rStatus === OK) {
+    const value = rValue
+    if (value !== InternalParser.missing) {
+      if (frame.out !== undefined) InternalRecord.assignProperty(frame.out, key, value)
+    } else {
+      const child = properties(node.p)[i].ast
+      if (!child.context?.isOptional) {
+        const terminal = missingKey(frame, key, child)
+        if (terminal !== undefined) return terminal
+      }
+    }
+  } else {
+    const terminal = keyFailure(frame, key)
+    if (terminal !== undefined) return terminal
+  }
+  frame.i = i + 1
+  return property(node, frame.input, i + 1)
+}
+
+const structFrame: FrameKind<StructPayload, Struct, Struct | undefined> = {
+  resume: resumeStruct,
+  copy: copyStruct
 }
 
 interface SuspendPayload {
