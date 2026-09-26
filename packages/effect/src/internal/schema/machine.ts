@@ -30,6 +30,8 @@ let rValue: unknown = undefined
 let rIssue: Issue | undefined = undefined
 let rCause: Cause.Cause<Issue> = causeEmpty
 let rInput: unknown = undefined
+const unplanned = Symbol()
+let rPlanFailure: unknown = unplanned
 const idle: Pending = exitSucceed(undefined)
 let rPending: Pending = idle
 let rResult: Exit.Exit<unknown, Issue> | undefined = undefined
@@ -248,8 +250,16 @@ function unwind(base: number, error: unknown, previous: SchemaAST.ParseOptions, 
     }
   }
   popTo(base)
-  if (root) return failCause(causeDie(error))
+  if (root) {
+    if (error !== rPlanFailure) return failCause(causeDie(error))
+    rPlanFailure = unplanned
+  }
   rOptions = previous
+  throw error
+}
+
+function planned<A>(error: unknown): A {
+  rPlanFailure = error
   throw error
 }
 
@@ -344,6 +354,7 @@ export function decode(
   options: SchemaAST.ParseOptions,
   root: boolean
 ): Pending {
+  if (root) rPlanFailure = unplanned
   const previous = rOptions
   rOptions = options
   const base = sp
@@ -543,3 +554,36 @@ export function objectsNode(ast: SchemaAST.Objects, resolver: Resolver): Node<un
   }
   return node(notNullishKind, ast, undefined)
 }
+
+/** @internal */
+export function declarationNode(ast: SchemaAST.Declaration, resolver: Resolver): Node<unknown> {
+  for (const parameter of ast.typeParameters) resolver.node(parameter)
+  return new Node(declarationKind, ast, ast.checks, ast.encodingChecks, { declaration: ast, run: undefined })
+}
+
+interface DeclarationPayload {
+  readonly declaration: SchemaAST.Declaration
+  run: ReturnType<SchemaAST.Declaration["run"]> | undefined
+}
+
+function enterDeclaration(node: Node<DeclarationPayload>, input: unknown): Step {
+  if (input === InternalParser.missing) return succeed(input)
+  const p = node.p
+  const run = p.run ?? resolveRun(p)
+  const result = run(input, p.declaration, rOptions)
+  if (!effectIsExit(result)) return suspendAt(node, input, result)
+  if (result._tag === "Failure") return failCause(result.cause)
+  return complete(node, input, result === InternalParser.sameExit ? input : result.value)
+}
+
+function resolveRun(p: DeclarationPayload): ReturnType<SchemaAST.Declaration["run"]> {
+  let run: ReturnType<SchemaAST.Declaration["run"]>
+  try {
+    run = p.declaration.run(p.declaration.typeParameters)
+  } catch (error) {
+    return planned(error)
+  }
+  return p.run = run
+}
+
+const declarationKind: Kind<DeclarationPayload> = { enter: enterDeclaration }

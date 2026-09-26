@@ -791,6 +791,10 @@ export const Declaration: new(
     this.encodingRun = encodingRun
   }
   /** @internal */
+  override getNode(resolver: Machine.Resolver): Machine.Node<unknown> {
+    return Machine.declarationNode(this, resolver)
+  }
+  /** @internal */
   getParser(): SchemaParser.Parser {
     let run: ReturnType<typeof this.run>
     return (input, options) => {
