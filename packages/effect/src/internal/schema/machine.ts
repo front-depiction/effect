@@ -3,10 +3,11 @@ import type * as Cause from "../../Cause.ts"
 import type * as Effect from "../../Effect.ts"
 import type * as Exit from "../../Exit.ts"
 import type * as SchemaAST from "../../SchemaAST.ts"
-import type * as SchemaIssue from "../../SchemaIssue.ts"
+import * as SchemaIssue from "../../SchemaIssue.ts"
 import type { Parser } from "../../SchemaParser.ts"
 import { causeDie, causeEmpty, exitFail, exitFailCause, exitSucceed } from "../core.ts"
 import { effectIsExit, exit as exitEffect, flatMap, suspend } from "../effect.ts"
+import { collectIssues } from "./checks.ts"
 import * as InternalParser from "./parser.ts"
 
 type Issue = SchemaIssue.Issue
@@ -157,6 +158,12 @@ function succeed(value: unknown): Signal {
   return DONE
 }
 
+function failIssue(issue: Issue): Signal {
+  rStatus = ISSUE
+  rIssue = issue
+  return DONE
+}
+
 function failCause(cause: Cause.Cause<Issue>): Signal {
   rStatus = CAUSE
   rCause = cause
@@ -184,6 +191,26 @@ function failureExit(): Exit.Exit<never, Issue> {
 
 function result(): Exit.Exit<unknown, Issue> {
   return rStatus === OK ? exitSucceed(rValue) : failureExit()
+}
+
+function complete(node: Node<unknown>, input: unknown, value: unknown): Signal {
+  const options = rOptions
+  if (options.disableChecks) return succeed(value)
+  const encodingChecks = node.encodingChecks
+  if (encodingChecks !== undefined && input !== InternalParser.missing && value !== InternalParser.missing) {
+    const issues = collectIssues(encodingChecks, input, undefined, node.ast, options)
+    if (issues) return failIssue(new SchemaIssue.Composite(node.ast, issues, input, options))
+  }
+  const checks = node.checks
+  if (checks !== undefined && value !== InternalParser.missing) {
+    const issues = collectIssues(checks, value, undefined, node.ast, options)
+    if (issues) return failIssue(new SchemaIssue.Composite(node.ast, issues, value, options))
+  }
+  return succeed(value)
+}
+
+function invalidType(node: Node<unknown>, input: unknown): Signal {
+  return failIssue(new SchemaIssue.InvalidType(node.ast, input, rOptions))
 }
 
 function decodeLoop(base: number, step: Step): Signal {
@@ -334,9 +361,11 @@ export function decode(
 const identity = <O>(out: O): O => out
 
 const suspensionFrame: FrameKind<unknown, unknown, undefined> = {
-  resume() {
+  resume(frame) {
+    const node = frame.node
+    const input = frame.input
     pop()
-    return DONE
+    return rStatus === OK ? complete(node, input, rValue) : DONE
   },
   copy: identity
 }
@@ -345,6 +374,94 @@ function suspendAt(node: Node<unknown>, input: unknown, pending: Pending): Signa
   push(suspensionFrame, node, input, undefined, 0, 0, 0)
   return suspendOn(pending)
 }
+
+function enterString(node: Node<undefined>, input: unknown): Step {
+  if (input === InternalParser.missing) return succeed(input)
+  return typeof input === "string" ? complete(node, input, input) : invalidType(node, input)
+}
+
+const stringKind: Kind<undefined> = { enter: enterString }
+
+function enterNumber(node: Node<undefined>, input: unknown): Step {
+  if (input === InternalParser.missing) return succeed(input)
+  return typeof input === "number" ? complete(node, input, input) : invalidType(node, input)
+}
+
+const numberKind: Kind<undefined> = { enter: enterNumber }
+
+function enterBoolean(node: Node<undefined>, input: unknown): Step {
+  if (input === InternalParser.missing) return succeed(input)
+  return typeof input === "boolean" ? complete(node, input, input) : invalidType(node, input)
+}
+
+const booleanKind: Kind<undefined> = { enter: enterBoolean }
+
+function enterBigInt(node: Node<undefined>, input: unknown): Step {
+  if (input === InternalParser.missing) return succeed(input)
+  return typeof input === "bigint" ? complete(node, input, input) : invalidType(node, input)
+}
+
+const bigintKind: Kind<undefined> = { enter: enterBigInt }
+
+function enterSymbol(node: Node<undefined>, input: unknown): Step {
+  if (input === InternalParser.missing) return succeed(input)
+  return typeof input === "symbol" ? complete(node, input, input) : invalidType(node, input)
+}
+
+const symbolKind: Kind<undefined> = { enter: enterSymbol }
+
+function enterObjectKeyword(node: Node<undefined>, input: unknown): Step {
+  if (input === InternalParser.missing) return succeed(input)
+  return (typeof input === "object" && input !== null) || typeof input === "function"
+    ? complete(node, input, input)
+    : invalidType(node, input)
+}
+
+const objectKeywordKind: Kind<undefined> = { enter: enterObjectKeyword }
+
+function enterNotNullish(node: Node<undefined>, input: unknown): Step {
+  if (input === InternalParser.missing) return succeed(input)
+  return input != null ? complete(node, input, input) : invalidType(node, input)
+}
+
+const notNullishKind: Kind<undefined> = { enter: enterNotNullish }
+
+function enterAny(node: Node<undefined>, input: unknown): Step {
+  if (input === InternalParser.missing) return succeed(input)
+  return complete(node, input, input)
+}
+
+const anyKind: Kind<undefined> = { enter: enterAny }
+
+function enterNever(node: Node<undefined>, input: unknown): Step {
+  if (input === InternalParser.missing) return succeed(input)
+  return invalidType(node, input)
+}
+
+const neverKind: Kind<undefined> = { enter: enterNever }
+
+function enterConst(node: Node<unknown>, input: unknown): Step {
+  if (input === InternalParser.missing) return succeed(input)
+  const value = node.p
+  if (input === value) return complete(node, input, value === 0 ? input : value)
+  return invalidType(node, input)
+}
+
+const constKind: Kind<unknown> = { enter: enterConst }
+
+function enterVoid(node: Node<undefined>, input: unknown): Step {
+  if (input === InternalParser.missing) return succeed(input)
+  return complete(node, input, undefined)
+}
+
+const voidKind: Kind<undefined> = { enter: enterVoid }
+
+function enterEnum(node: Node<ReadonlySet<unknown>>, input: unknown): Step {
+  if (input === InternalParser.missing) return succeed(input)
+  return node.p.has(input) ? complete(node, input, input) : invalidType(node, input)
+}
+
+const enumKind: Kind<ReadonlySet<unknown>> = { enter: enterEnum }
 
 interface ForeignPayload {
   readonly get: () => Parser
@@ -378,4 +495,51 @@ export function build(ast: SchemaAST.AST, resolver: Resolver): Node<unknown> | u
   const encoding = ast.encoding
   const built = encoding === undefined ? ast.getNode(resolver) : encoding[0].getNode(ast, encoding, resolver)
   return built instanceof Node ? built : undefined
+}
+
+function node<P>(kind: Kind<P>, ast: SchemaAST.AST, p: P): Node<unknown> {
+  return new Node(kind, ast, ast.checks, undefined, p)
+}
+
+/** @internal */
+export const stringNode = (ast: SchemaAST.String): Node<unknown> => node(stringKind, ast, undefined)
+
+/** @internal */
+export const numberNode = (ast: SchemaAST.Number): Node<unknown> => node(numberKind, ast, undefined)
+
+/** @internal */
+export const booleanNode = (ast: SchemaAST.Boolean): Node<unknown> => node(booleanKind, ast, undefined)
+
+/** @internal */
+export const bigintNode = (ast: SchemaAST.BigInt): Node<unknown> => node(bigintKind, ast, undefined)
+
+/** @internal */
+export const symbolNode = (ast: SchemaAST.Symbol): Node<unknown> => node(symbolKind, ast, undefined)
+
+/** @internal */
+export const objectKeywordNode = (ast: SchemaAST.ObjectKeyword): Node<unknown> =>
+  node(objectKeywordKind, ast, undefined)
+
+/** @internal */
+export const anyNode = (ast: SchemaAST.Any | SchemaAST.Unknown): Node<unknown> => node(anyKind, ast, undefined)
+
+/** @internal */
+export const neverNode = (ast: SchemaAST.Never): Node<unknown> => node(neverKind, ast, undefined)
+
+/** @internal */
+export const constNode = (ast: SchemaAST.AST, value: unknown): Node<unknown> => node(constKind, ast, value)
+
+/** @internal */
+export const voidNode = (ast: SchemaAST.Void): Node<unknown> => node(voidKind, ast, undefined)
+
+/** @internal */
+export const enumNode = (ast: SchemaAST.Enum): Node<unknown> =>
+  node(enumKind, ast, new Set<unknown>(ast.enums.map(([, v]) => v)))
+
+/** @internal */
+export function objectsNode(ast: SchemaAST.Objects, resolver: Resolver): Node<unknown> {
+  if (ast.indexSignatures.length > 0 || ast.propertySignatures.length > 0) {
+    return foreign(ast, () => resolver.whole(ast))
+  }
+  return node(notNullishKind, ast, undefined)
 }

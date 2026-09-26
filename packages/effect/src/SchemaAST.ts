@@ -21,6 +21,7 @@ import { effectIsExit, iterateConcurrent, iterateEager, resolveConcurrency } fro
 import * as InternalRecord from "./internal/record.ts"
 import * as InternalAnnotations from "./internal/schema/annotations.ts"
 import * as InternalSchemaCause from "./internal/schema/cause.ts"
+import { collectIssues } from "./internal/schema/checks.ts"
 import * as Machine from "./internal/schema/machine.ts"
 import * as InternalParser from "./internal/schema/parser.ts"
 import * as Pipeable from "./Pipeable.ts"
@@ -862,6 +863,10 @@ export const Null: new(
 ) => Null = class extends ASTNodeImpl {
   readonly _tag = "Null"
   /** @internal */
+  override getNode(): Machine.Node<unknown> {
+    return Machine.constNode(this, null)
+  }
+  /** @internal */
   getParser() {
     return fromConst(this, null)
   }
@@ -925,6 +930,10 @@ export const Undefined: new(
   context?: Context | undefined
 ) => Undefined = class extends ASTNodeImpl {
   readonly _tag = "Undefined"
+  /** @internal */
+  override getNode(): Machine.Node<unknown> {
+    return Machine.constNode(this, undefined)
+  }
   /** @internal */
   getParser() {
     return fromConst(this, undefined)
@@ -1012,6 +1021,10 @@ export const Void: new(
 ) => Void = class extends ASTNodeImpl {
   readonly _tag = "Void"
   /** @internal */
+  override getNode(): Machine.Node<unknown> {
+    return Machine.voidNode(this)
+  }
+  /** @internal */
   getParser() {
     const succeed = InternalParser.succeed(undefined)
     return (input: unknown) => input === InternalParser.missing ? InternalParser.missingExit : succeed
@@ -1088,6 +1101,10 @@ export const Never: new(
 ) => Never = class extends ASTNodeImpl {
   readonly _tag = "Never"
   /** @internal */
+  override getNode(): Machine.Node<unknown> {
+    return Machine.neverNode(this)
+  }
+  /** @internal */
   getParser() {
     return fromRefinement(this, Predicate.isNever)
   }
@@ -1145,6 +1162,10 @@ export const Any: new(
   context?: Context | undefined
 ) => Any = class extends ASTNodeImpl {
   readonly _tag = "Any"
+  /** @internal */
+  override getNode(): Machine.Node<unknown> {
+    return Machine.anyNode(this)
+  }
   /** @internal */
   getParser() {
     return fromRefinement(this, Predicate.isUnknown)
@@ -1207,6 +1228,10 @@ export const Unknown: new(
 ) => Unknown = class extends ASTNodeImpl {
   readonly _tag = "Unknown"
   /** @internal */
+  override getNode(): Machine.Node<unknown> {
+    return Machine.anyNode(this)
+  }
+  /** @internal */
   getParser() {
     return fromRefinement(this, Predicate.isUnknown)
   }
@@ -1264,6 +1289,10 @@ export const ObjectKeyword: new(
   context?: Context | undefined
 ) => ObjectKeyword = class extends ASTNodeImpl {
   readonly _tag = "ObjectKeyword"
+  /** @internal */
+  override getNode(): Machine.Node<unknown> {
+    return Machine.objectKeywordNode(this)
+  }
   /** @internal */
   getParser() {
     return fromRefinement(this, Predicate.isObjectKeyword)
@@ -1356,6 +1385,10 @@ export const Enum: new(
       }
     }
     this.enums = enums
+  }
+  /** @internal */
+  override getNode(): Machine.Node<unknown> {
+    return Machine.enumNode(this)
   }
   /** @internal */
   getParser() {
@@ -1645,6 +1678,10 @@ export const UniqueSymbol: new(
     this.symbol = symbol
   }
   /** @internal */
+  override getNode(): Machine.Node<unknown> {
+    return Machine.constNode(this, this.symbol)
+  }
+  /** @internal */
   getParser() {
     return fromConst(this, this.symbol)
   }
@@ -1750,6 +1787,10 @@ export const Literal: new(
     this.literal = literal
   }
   /** @internal */
+  override getNode(): Machine.Node<unknown> {
+    return Machine.constNode(this, this.literal)
+  }
+  /** @internal */
   getParser() {
     return fromConst(this, this.literal)
   }
@@ -1819,6 +1860,10 @@ export const String: new(
   context?: Context | undefined
 ) => String = class extends ASTNodeImpl {
   readonly _tag = "String"
+  /** @internal */
+  override getNode(): Machine.Node<unknown> {
+    return Machine.stringNode(this)
+  }
   /** @internal */
   getParser() {
     return fromRefinement(this, Predicate.isString)
@@ -1903,6 +1948,10 @@ export const Number: new(
   context?: Context | undefined
 ) => Number = class extends ASTNodeImpl {
   readonly _tag = "Number"
+  /** @internal */
+  override getNode(): Machine.Node<unknown> {
+    return Machine.numberNode(this)
+  }
   /** @internal */
   getParser() {
     return fromRefinement(this, Predicate.isNumber)
@@ -2000,6 +2049,10 @@ export const Boolean: new(
 ) => Boolean = class extends ASTNodeImpl {
   readonly _tag = "Boolean"
   /** @internal */
+  override getNode(): Machine.Node<unknown> {
+    return Machine.booleanNode(this)
+  }
+  /** @internal */
   getParser() {
     return fromRefinement(this, Predicate.isBoolean)
   }
@@ -2072,6 +2125,10 @@ export const Symbol: new(
   context?: Context | undefined
 ) => Symbol = class extends ASTNodeImpl {
   readonly _tag = "Symbol"
+  /** @internal */
+  override getNode(): Machine.Node<unknown> {
+    return Machine.symbolNode(this)
+  }
   /** @internal */
   getParser() {
     return fromRefinement(this, Predicate.isSymbol)
@@ -2153,6 +2210,10 @@ export const BigInt: new(
   context?: Context | undefined
 ) => BigInt = class extends ASTNodeImpl {
   readonly _tag = "BigInt"
+  /** @internal */
+  override getNode(): Machine.Node<unknown> {
+    return Machine.bigintNode(this)
+  }
   /** @internal */
   getParser() {
     return fromRefinement(this, Predicate.isBigInt)
@@ -2796,6 +2857,10 @@ export const Objects: new(
     this.propertySignatures = propertySignatures
     this.indexSignatures = indexSignatures
     this.encodingChecks = encodingChecks
+  }
+  /** @internal */
+  override getNode(resolver: Machine.Resolver): Machine.Node<unknown> {
+    return Machine.objectsNode(this, resolver)
   }
   /** @internal */
   getParser(
@@ -4940,37 +5005,7 @@ export function isStringSymbol(annotations?: Schema.Annotations.Filter) {
 }
 
 /** @internal */
-export function collectIssues<T>(
-  checks: ReadonlyArray<Check<T>>,
-  value: T,
-  issues: Arr.NonEmptyArray<SchemaIssue.Issue> | undefined,
-  ast: AST,
-  options: ParseOptions
-): Arr.NonEmptyArray<SchemaIssue.Issue> | undefined {
-  for (let i = 0; i < checks.length; i++) {
-    const check = checks[i]
-    if (check._tag === "FilterGroup") {
-      issues = collectIssues(check.checks, value, issues, ast, options)
-      if (
-        issues &&
-        (options.errors !== "all" || (issues[issues.length - 1] as SchemaIssue.Filter).filter.aborted)
-      ) {
-        return issues
-      }
-    } else {
-      const issue = check.run(value, ast, options)
-      if (issue) {
-        const filter = new SchemaIssue.Filter(check, issue, value, options)
-        if (issues) issues.push(filter)
-        else issues = [filter]
-        if (options.errors !== "all" || check.aborted) {
-          return issues
-        }
-      }
-    }
-  }
-  return issues
-}
+export { collectIssues }
 
 /** @internal */
 export function runChecks<T>(
