@@ -141,7 +141,7 @@ export function is<S extends Schema.Constraint>(schema: S): <I>(input: I) => inp
 
 function makeIs<T>(ast: SchemaAST.AST): <I>(input: I) => input is I & T {
   if (!CompilerRegistry.compilerAdaptersEnabled) {
-    const parser = asExit(run<T, never>(ast))
+    const parser = asExit(runWithCompiler<T, never>(guardCompiler, ast))
     return <I>(input: I): input is I & T => {
       const exit = parser(input, SchemaAST.defaultParseOptions)
       if (Exit.isSuccess(exit)) return true
@@ -1153,3 +1153,4 @@ export interface Compiler {
 
 const normalCompiler: Compiler = (ast) => CompilerRegistry.resolve(ast).rootEffect
 const constructorCompiler: Compiler = (ast) => CompilerRegistry.resolve(ast).makeEffect
+const guardCompiler: Compiler = (ast) => CompilerRegistry.resolve(ast).guardEffect

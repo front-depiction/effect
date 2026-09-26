@@ -74,6 +74,7 @@ export interface Entry {
   readonly makeEffect: Parser
   readonly node: Machine.Node<unknown>
   readonly rootEffect: Parser
+  readonly guardEffect: Parser
 }
 
 class InterpretedEntry implements Entry {
@@ -81,6 +82,7 @@ class InterpretedEntry implements Entry {
   declare private cachedDecodeEffect: Parser | undefined
   declare private cachedMakeEffect: Parser | undefined
   declare private cachedRootEffect: Parser | undefined
+  declare private cachedGuardEffect: Parser | undefined
   declare private cachedNode: Machine.Node<unknown> | undefined
   declare private cachedPlan: Machine.Node<unknown> | null | undefined
   declare private cachedClosure: Parser | undefined
@@ -120,6 +122,13 @@ class InterpretedEntry implements Entry {
     }
   }
 
+  get guardEffect(): Parser {
+    return this.cachedGuardEffect ??= (input, options) => {
+      const plan = this.plan
+      return plan !== null && isSequential(options) ? Machine.guard(plan, input, options) : this.closure(input, options)
+    }
+  }
+
   get parser(): Parser {
     return this.decodeEffect
   }
@@ -154,6 +163,10 @@ class CompilerEntry extends InterpretedEntry {
   }
 
   override get rootEffect(): Parser {
+    return this.parser
+  }
+
+  override get guardEffect(): Parser {
     return this.parser
   }
 

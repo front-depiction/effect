@@ -36,12 +36,14 @@ const CAUSE = 2
 
 const CATCH = 1
 const RESTART = 2
+const GUARD = 4
 
 let rStatus: typeof OK | typeof ISSUE | typeof CAUSE = OK
 let rValue: unknown = undefined
 let rIssue: Issue | undefined = undefined
 let rCause: Cause.Cause<Issue> = causeEmpty
 let rInput: unknown = undefined
+let rGuard = false
 const unplanned = Symbol()
 let rPlanFailure: unknown = unplanned
 const idle: Pending = exitSucceed(undefined)
@@ -51,6 +53,7 @@ let rOptions: SchemaAST.ParseOptions = {}
 
 interface Kind<P> {
   enter(node: Node<P>, input: unknown): Step
+  guard(node: Node<P>, input: unknown): Step
 }
 
 /** @internal */
@@ -199,6 +202,12 @@ function enterChild(node: Node<unknown>, input: unknown): Step {
   return node
 }
 
+function guardChild(node: Node<unknown>, input: unknown): Step {
+  rInput = input
+  rGuard = true
+  return node
+}
+
 function add<P, I, O>(frame: Frame<P, I, O>, issue: Issue): void {
   if (frame.acc) frame.acc.push(issue)
   else frame.acc = [issue]
@@ -304,6 +313,24 @@ function decodeLoop(base: number, step: Step): Signal {
   }
 }
 
+function guardLoop(base: number, step: Step): Signal {
+  while (true) {
+    if (typeof step !== "number") {
+      if (rGuard) {
+        rGuard = false
+        step = step.kind.guard(step, rInput)
+      } else {
+        step = step.kind.enter(step, rInput)
+      }
+    } else if (step === SUSPEND || sp === base) {
+      return step
+    } else {
+      const frame = stack[sp - 1]
+      step = frame.kind.resume(frame)
+    }
+  }
+}
+
 type Loop = (base: number, step: Step) => Signal
 
 function drive(loop: Loop, base: number, step: Step, previous: SchemaAST.ParseOptions, root: boolean): Signal {
@@ -343,10 +370,11 @@ interface Snapshot {
   readonly frames: ReadonlyArray<AnyFrame>
   readonly restart: number
   readonly options: SchemaAST.ParseOptions
+  readonly guard: boolean
   readonly pending: Pending
 }
 
-function snapshot(base: number, options: SchemaAST.ParseOptions): Snapshot {
+function snapshot(base: number, options: SchemaAST.ParseOptions, guard: boolean): Snapshot {
   const frames: Array<AnyFrame> = []
   let restart = -1
   for (let k = base; k < sp; k++) {
@@ -367,7 +395,7 @@ function snapshot(base: number, options: SchemaAST.ParseOptions): Snapshot {
     )
   }
   popTo(base)
-  return { frames, restart, options, pending: rPending }
+  return { frames, restart, options, guard, pending: rPending }
 }
 
 function restore(frames: ReadonlyArray<AnyFrame>, end: number): void {
@@ -380,7 +408,7 @@ function restore(frames: ReadonlyArray<AnyFrame>, end: number): void {
   }
 }
 
-function settle(base: number, signal: Signal, options: SchemaAST.ParseOptions): Pending {
+function settle(base: number, signal: Signal, options: SchemaAST.ParseOptions, guard: boolean): Pending {
   if (signal === DONE) return result()
   if (sp - base === 1) {
     const frame = stack[base]
@@ -389,7 +417,7 @@ function settle(base: number, signal: Signal, options: SchemaAST.ParseOptions): 
       return rPending
     }
   }
-  return describe(snapshot(base, options))
+  return describe(snapshot(base, options, guard))
 }
 
 function describe(k: Snapshot): Pending {
@@ -407,9 +435,9 @@ function resume(k: Snapshot, result: Exit.Exit<unknown, Issue>): Pending {
   rOptions = k.options
   const base = sp
   restore(k.frames, k.frames.length)
-  const signal = drive(decodeLoop, base, deliver(result, undefined), previous, false)
+  const signal = drive(k.guard ? guardLoop : decodeLoop, base, deliver(result, undefined), previous, false)
   rOptions = previous
-  return release(settle(base, signal, k.options))
+  return release(settle(base, signal, k.options, k.guard))
 }
 
 function restart(k: Snapshot): Pending {
@@ -418,9 +446,15 @@ function restart(k: Snapshot): Pending {
   const base = sp
   restore(k.frames, k.restart)
   const frame = k.frames[k.restart]
-  const signal = drive(decodeLoop, base, enterChild(frame.node, frame.input), previous, false)
+  const signal = drive(
+    k.guard ? guardLoop : decodeLoop,
+    base,
+    frame.flags & GUARD ? guardChild(frame.node, frame.input) : enterChild(frame.node, frame.input),
+    previous,
+    false
+  )
   rOptions = previous
-  return release(settle(base, signal, k.options))
+  return release(settle(base, signal, k.options, k.guard))
 }
 
 /** @internal */
@@ -441,7 +475,22 @@ export function decode(
       ? rResult
       : signal === DONE && rStatus === OK && rValue === input && input !== InternalParser.missing
       ? InternalParser.sameExit
-      : settle(base, signal, options)
+      : settle(base, signal, options, false)
+  )
+}
+
+/** @internal */
+export function guard(node: Node<unknown>, input: unknown, options: SchemaAST.ParseOptions): Pending {
+  rPlanFailure = unplanned
+  const previous = rOptions
+  rOptions = options
+  const base = sp
+  const signal = drive(guardLoop, base, guardChild(node, input), previous, true)
+  rOptions = previous
+  return release(
+    signal === DONE && rStatus === OK && rValue === input && input !== InternalParser.missing
+      ? InternalParser.sameExit
+      : settle(base, signal, options, true)
   )
 }
 
@@ -467,35 +516,35 @@ function enterString(node: Node<undefined>, input: unknown): Step {
   return typeof input === "string" ? complete(node, input, input) : invalidType(node, input)
 }
 
-const stringKind: Kind<undefined> = { enter: enterString }
+const stringKind: Kind<undefined> = { enter: enterString, guard: enterString }
 
 function enterNumber(node: Node<undefined>, input: unknown): Step {
   if (input === InternalParser.missing) return succeed(input)
   return typeof input === "number" ? complete(node, input, input) : invalidType(node, input)
 }
 
-const numberKind: Kind<undefined> = { enter: enterNumber }
+const numberKind: Kind<undefined> = { enter: enterNumber, guard: enterNumber }
 
 function enterBoolean(node: Node<undefined>, input: unknown): Step {
   if (input === InternalParser.missing) return succeed(input)
   return typeof input === "boolean" ? complete(node, input, input) : invalidType(node, input)
 }
 
-const booleanKind: Kind<undefined> = { enter: enterBoolean }
+const booleanKind: Kind<undefined> = { enter: enterBoolean, guard: enterBoolean }
 
 function enterBigInt(node: Node<undefined>, input: unknown): Step {
   if (input === InternalParser.missing) return succeed(input)
   return typeof input === "bigint" ? complete(node, input, input) : invalidType(node, input)
 }
 
-const bigintKind: Kind<undefined> = { enter: enterBigInt }
+const bigintKind: Kind<undefined> = { enter: enterBigInt, guard: enterBigInt }
 
 function enterSymbol(node: Node<undefined>, input: unknown): Step {
   if (input === InternalParser.missing) return succeed(input)
   return typeof input === "symbol" ? complete(node, input, input) : invalidType(node, input)
 }
 
-const symbolKind: Kind<undefined> = { enter: enterSymbol }
+const symbolKind: Kind<undefined> = { enter: enterSymbol, guard: enterSymbol }
 
 function enterObjectKeyword(node: Node<undefined>, input: unknown): Step {
   if (input === InternalParser.missing) return succeed(input)
@@ -504,28 +553,28 @@ function enterObjectKeyword(node: Node<undefined>, input: unknown): Step {
     : invalidType(node, input)
 }
 
-const objectKeywordKind: Kind<undefined> = { enter: enterObjectKeyword }
+const objectKeywordKind: Kind<undefined> = { enter: enterObjectKeyword, guard: enterObjectKeyword }
 
 function enterNotNullish(node: Node<undefined>, input: unknown): Step {
   if (input === InternalParser.missing) return succeed(input)
   return input != null ? complete(node, input, input) : invalidType(node, input)
 }
 
-const notNullishKind: Kind<undefined> = { enter: enterNotNullish }
+const notNullishKind: Kind<undefined> = { enter: enterNotNullish, guard: enterNotNullish }
 
 function enterAny(node: Node<undefined>, input: unknown): Step {
   if (input === InternalParser.missing) return succeed(input)
   return complete(node, input, input)
 }
 
-const anyKind: Kind<undefined> = { enter: enterAny }
+const anyKind: Kind<undefined> = { enter: enterAny, guard: enterAny }
 
 function enterNever(node: Node<undefined>, input: unknown): Step {
   if (input === InternalParser.missing) return succeed(input)
   return invalidType(node, input)
 }
 
-const neverKind: Kind<undefined> = { enter: enterNever }
+const neverKind: Kind<undefined> = { enter: enterNever, guard: enterNever }
 
 function enterConst(node: Node<unknown>, input: unknown): Step {
   if (input === InternalParser.missing) return succeed(input)
@@ -534,21 +583,21 @@ function enterConst(node: Node<unknown>, input: unknown): Step {
   return invalidType(node, input)
 }
 
-const constKind: Kind<unknown> = { enter: enterConst }
+const constKind: Kind<unknown> = { enter: enterConst, guard: enterConst }
 
 function enterVoid(node: Node<undefined>, input: unknown): Step {
   if (input === InternalParser.missing) return succeed(input)
   return complete(node, input, undefined)
 }
 
-const voidKind: Kind<undefined> = { enter: enterVoid }
+const voidKind: Kind<undefined> = { enter: enterVoid, guard: enterVoid }
 
 function enterEnum(node: Node<ReadonlySet<unknown>>, input: unknown): Step {
   if (input === InternalParser.missing) return succeed(input)
   return node.p.has(input) ? complete(node, input, input) : invalidType(node, input)
 }
 
-const enumKind: Kind<ReadonlySet<unknown>> = { enter: enterEnum }
+const enumKind: Kind<ReadonlySet<unknown>> = { enter: enterEnum, guard: enterEnum }
 
 interface ForeignPayload {
   readonly get: () => Parser
@@ -564,7 +613,7 @@ function enterForeign(node: Node<ForeignPayload>, input: unknown): Step {
   return deliver(result, input)
 }
 
-const foreignKind: Kind<ForeignPayload> = { enter: enterForeign }
+const foreignKind: Kind<ForeignPayload> = { enter: enterForeign, guard: enterForeign }
 
 /** @internal */
 export interface Resolver {
@@ -717,22 +766,27 @@ function copyStruct(out: Struct | undefined): Struct | undefined {
   return copy
 }
 
-function enterStruct(node: Node<StructPayload>, input: unknown): Step {
+function enterStruct(
+  node: Node<StructPayload>,
+  input: unknown,
+  frame: FrameKind<StructPayload, Struct, Struct | undefined>,
+  out: boolean
+): Step {
   if (input === InternalParser.missing) return succeed(input)
   const options = rOptions
   if (options.errors !== "all" && options.onExcessProperty === undefined) {
     if (!isStruct(input)) return invalidType(node, input)
     properties(node.p)
-    push(structFrame, node, input, {}, 0, 0, CATCH)
+    push(frame, node, input, out ? {} : undefined, 0, 0, out ? CATCH : CATCH | GUARD)
     return property(node, input, 0)
   }
-  push(structFrame, node, input, undefined, 0, 0, CATCH | RESTART)
+  push(frame, node, input, undefined, 0, 0, out ? CATCH | RESTART : CATCH | RESTART | GUARD)
   if (!isStruct(input)) {
     pop()
     return invalidType(node, input)
   }
   properties(node.p)
-  stack[sp - 1].out = {}
+  if (out) stack[sp - 1].out = {}
   if (options.onExcessProperty === "error") {
     const expected = node.p.expected
     const keys = Reflect.ownKeys(input)
@@ -751,7 +805,16 @@ function enterStruct(node: Node<StructPayload>, input: unknown): Step {
   return property(node, input, 0)
 }
 
-const structKind: Kind<StructPayload> = { enter: enterStruct }
+const structKind: Kind<StructPayload> = {
+  enter(node, input) {
+    return enterStruct(node, input, structFrame, true)
+  },
+  guard(node, input) {
+    return node.checks === undefined && node.encodingChecks === undefined
+      ? enterStruct(node, input, structGuardFrame, false)
+      : enterStruct(node, input, structFrame, true)
+  }
+}
 
 function property(node: Node<StructPayload>, input: Struct, i: number): Step {
   const keys = node.p.keys
@@ -759,7 +822,7 @@ function property(node: Node<StructPayload>, input: Struct, i: number): Step {
   const key = keys[i]
   const child = properties(node.p)[i]
   const value = (key === "__proto__" ? Object.hasOwn(input, key) : key in input) ? input[key] : InternalParser.missing
-  return enterChild(child, value)
+  return stack[sp - 1].kind === structFrame ? enterChild(child, value) : guardChild(child, value)
 }
 
 function finishStruct(): Signal {
@@ -801,6 +864,11 @@ const structFrame: FrameKind<StructPayload, Struct, Struct | undefined> = {
   copy: copyStruct
 }
 
+const structGuardFrame: FrameKind<StructPayload, Struct, Struct | undefined> = {
+  resume: resumeStruct,
+  copy: identity
+}
+
 interface ArrayPayload {
   readonly arrays: SchemaAST.Arrays
   readonly resolver: Resolver
@@ -810,9 +878,14 @@ interface ArrayPayload {
 
 type Elements = ReadonlyArray<unknown>
 
-function enterArray(node: Node<ArrayPayload>, input: unknown): Step {
+function enterArray(
+  node: Node<ArrayPayload>,
+  input: unknown,
+  frame: FrameKind<ArrayPayload, Elements, Array<unknown> | undefined>,
+  out: boolean
+): Step {
   if (input === InternalParser.missing) return succeed(input)
-  push(arrayFrame, node, input, undefined, 0, 0, CATCH | RESTART)
+  push(frame, node, input, undefined, 0, 0, out ? CATCH | RESTART : CATCH | RESTART | GUARD)
   if (!Array.isArray(input)) {
     pop()
     return invalidType(node, input)
@@ -824,12 +897,21 @@ function enterArray(node: Node<ArrayPayload>, input: unknown): Step {
   }
   const len = input.length
   const top = stack[sp - 1]
-  top.out = new Array(len)
+  if (out) top.out = new Array(len)
   top.j = len
   return element(node, input, 0, len)
 }
 
-const arrayKind: Kind<ArrayPayload> = { enter: enterArray }
+const arrayKind: Kind<ArrayPayload> = {
+  enter(node, input) {
+    return enterArray(node, input, arrayFrame, true)
+  },
+  guard(node, input) {
+    return node.checks === undefined && node.encodingChecks === undefined
+      ? enterArray(node, input, arrayGuardFrame, false)
+      : enterArray(node, input, arrayFrame, true)
+  }
+}
 
 function element(node: Node<ArrayPayload>, input: Elements, i: number, len: number): Step {
   const arrays = node.p.arrays
@@ -840,7 +922,7 @@ function element(node: Node<ArrayPayload>, input: Elements, i: number, len: numb
   const item = input[i]
   const child = elementAt(node.p, i, len)
   const value = i < len ? item : InternalParser.missing
-  return enterChild(child, value)
+  return stack[sp - 1].kind === arrayFrame ? enterChild(child, value) : guardChild(child, value)
 }
 
 function elementAt(p: ArrayPayload, i: number, len: number): Node<unknown> {
@@ -901,6 +983,11 @@ const arrayFrame: FrameKind<ArrayPayload, Elements, Array<unknown> | undefined> 
   copy: (out) => out === undefined ? out : out.slice()
 }
 
+const arrayGuardFrame: FrameKind<ArrayPayload, Elements, Array<unknown> | undefined> = {
+  resume: resumeArray,
+  copy: identity
+}
+
 interface UnionPayload {
   readonly union: SchemaAST.Union
   readonly resolver: Resolver
@@ -914,7 +1001,7 @@ function member(p: UnionPayload, i: number): Node<unknown> {
   return p.members[i] ??= p.resolver.node(p.union.types[i])
 }
 
-function enterUnion(node: Node<UnionPayload>, input: unknown): Step {
+function enterUnion(node: Node<UnionPayload>, input: unknown, child: typeof enterChild): Step {
   if (input === InternalParser.missing) return succeed(input)
   const p = node.p
   const candidates = (p.index ??= p.candidates(p.union.types))(input, false)
@@ -923,13 +1010,22 @@ function enterUnion(node: Node<UnionPayload>, input: unknown): Step {
   }
   if (candidates.length === 1) {
     push(unionSingleFrame, node, input, undefined, 0, 0, 0)
-    return enterChild(member(p, candidates[0]), input)
+    return child(member(p, candidates[0]), input)
   }
-  push(unionFrame, node, input, candidates, 0, -1, 0)
-  return enterChild(member(p, candidates[0]), input)
+  push(child === enterChild ? unionFrame : unionGuardFrame, node, input, candidates, 0, -1, 0)
+  return child(member(p, candidates[0]), input)
 }
 
-const unionKind: Kind<UnionPayload> = { enter: enterUnion }
+const unionKind: Kind<UnionPayload> = {
+  enter(node, input) {
+    return enterUnion(node, input, enterChild)
+  },
+  guard(node, input) {
+    return node.checks === undefined && node.encodingChecks === undefined
+      ? enterUnion(node, input, guardChild)
+      : enterUnion(node, input, enterChild)
+  }
+}
 
 const unionSingleFrame: FrameKind<UnionPayload, unknown, undefined> = {
   resume(frame) {
@@ -944,7 +1040,7 @@ const unionSingleFrame: FrameKind<UnionPayload, unknown, undefined> = {
   copy: identity
 }
 
-function resumeUnion(frame: Frame<UnionPayload, unknown, ReadonlyArray<number>>): Step {
+function resumeUnion(frame: Frame<UnionPayload, unknown, ReadonlyArray<number>>, child: typeof enterChild): Step {
   const node = frame.node
   const input = frame.input
   const options = rOptions
@@ -974,7 +1070,7 @@ function resumeUnion(frame: Frame<UnionPayload, unknown, ReadonlyArray<number>>)
   const next = frame.i + 1
   if (next < candidates.length) {
     frame.i = next
-    return enterChild(member(node.p, candidates[next]), input)
+    return child(member(node.p, candidates[next]), input)
   }
   const found = frame.j >= 0
   const value = frame.value
@@ -985,7 +1081,16 @@ function resumeUnion(frame: Frame<UnionPayload, unknown, ReadonlyArray<number>>)
 }
 
 const unionFrame: FrameKind<UnionPayload, unknown, ReadonlyArray<number>> = {
-  resume: resumeUnion,
+  resume(frame) {
+    return resumeUnion(frame, enterChild)
+  },
+  copy: identity
+}
+
+const unionGuardFrame: FrameKind<UnionPayload, unknown, ReadonlyArray<number>> = {
+  resume(frame) {
+    return resumeUnion(frame, guardChild)
+  },
   copy: identity
 }
 
@@ -995,12 +1100,16 @@ interface SuspendPayload {
   target: Node<unknown> | undefined
 }
 
-function enterSuspend(node: Node<SuspendPayload>, input: unknown): Step {
-  const p = node.p
-  return enterChild(p.target ?? resolveTarget(p), input)
+const suspendKind: Kind<SuspendPayload> = {
+  enter(node, input) {
+    const p = node.p
+    return enterChild(p.target ?? resolveTarget(p), input)
+  },
+  guard(node, input) {
+    const p = node.p
+    return guardChild(p.target ?? resolveTarget(p), input)
+  }
 }
-
-const suspendKind: Kind<SuspendPayload> = { enter: enterSuspend }
 
 function resolveTarget(p: SuspendPayload): Node<unknown> {
   let target: Node<unknown>
@@ -1037,7 +1146,7 @@ function resolveRun(p: DeclarationPayload): ReturnType<SchemaAST.Declaration["ru
   return p.run = run
 }
 
-const declarationKind: Kind<DeclarationPayload> = { enter: enterDeclaration }
+const declarationKind: Kind<DeclarationPayload> = { enter: enterDeclaration, guard: enterDeclaration }
 
 function enterTemplate(node: Node<Node<unknown>>, input: unknown): Step {
   if (input === InternalParser.missing) return succeed(input)
@@ -1045,7 +1154,7 @@ function enterTemplate(node: Node<Node<unknown>>, input: unknown): Step {
   return enterChild(node.p, input)
 }
 
-const templateKind: Kind<Node<unknown>> = { enter: enterTemplate }
+const templateKind: Kind<Node<unknown>> = { enter: enterTemplate, guard: enterTemplate }
 
 const templateFrame: FrameKind<Node<unknown>, unknown, undefined> = {
   resume(frame) {
@@ -1089,7 +1198,7 @@ function enterLink(node: Node<LinkPayload>, input: unknown): Step {
   return enterChild(parsers[last], input)
 }
 
-const linkKind: Kind<LinkPayload> = { enter: enterLink }
+const linkKind: Kind<LinkPayload> = { enter: enterLink, guard: enterLink }
 
 function transformAt(frame: Frame<LinkPayload, unknown, undefined>, i: number): Step {
   if (rStatus !== OK) return afterStep(frame, i)
