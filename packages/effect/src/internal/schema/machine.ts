@@ -12,10 +12,13 @@ import {
   causeMap,
   effectIsExit,
   exit as exitEffect,
+  exitVoid,
   failCauseSync,
   findError,
   flatMap,
+  iterateConcurrent,
   mapEager,
+  resolveConcurrency,
   suspend
 } from "../effect.ts"
 import * as InternalRecord from "../record.ts"
@@ -836,7 +839,7 @@ function foldStruct(node: Node<StructPayload>, input: unknown, depth: number): u
   if (input === InternalParser.missing) return input
   if (depth >= LIMIT) return descend(node, input, DESCEND)
   const options = rOptions
-  if (options.errors !== "all" && options.onExcessProperty === undefined) {
+  if (options.errors !== "all" && options.onExcessProperty === undefined && sequential(options)) {
     if (!isStruct(input)) return invalidType(node, input)
     properties(node.p)
     return structLoop(node, input, {}, 0, undefined, NONE, depth, CATCH)
@@ -849,7 +852,7 @@ function guardStruct(node: Node<StructPayload>, input: unknown, depth: number): 
   if (input === InternalParser.missing) return input
   if (depth >= LIMIT) return descend(node, input, DESCEND_GUARD)
   const options = rOptions
-  if (options.errors !== "all" && options.onExcessProperty === undefined) {
+  if (options.errors !== "all" && options.onExcessProperty === undefined && sequential(options)) {
     if (!isStruct(input)) return invalidType(node, input)
     properties(node.p)
     return structGuardLoop(node, input, 0, undefined, NONE, depth, CATCH | GUARD)
@@ -879,6 +882,7 @@ function structAccumulate(node: Node<StructPayload>, input: unknown, depth: numb
   } catch (error) {
     return die(error)
   }
+  if (!sequential(rOptions)) return forkStruct(node, input, acc)
   return guard
     ? structGuardLoop(node, input, 0, acc, NONE, depth, CATCH | RESTART | GUARD)
     : structLoop(node, input, {}, 0, acc, NONE, depth, CATCH | RESTART)
@@ -1077,6 +1081,7 @@ function foldRecord(node: Node<RecordPayload>, input: unknown, depth: number): u
   } catch (error) {
     return die(error)
   }
+  if (!sequential(rOptions)) return forkRecord(node, input, lists, acc)
   return recordLoop(node, input, {}, 0, 0, undefined, lists, NONE, acc, NONE, depth)
 }
 
@@ -1202,6 +1207,267 @@ function spillRecord(
 
 const recordKind: Kind<RecordPayload> = { fold: foldRecord, guard: foldRecord }
 
+function sequential(options: SchemaAST.ParseOptions): boolean {
+  return options.concurrency === undefined || resolveConcurrency(options.concurrency) === 1
+}
+
+interface Accumulator<I> {
+  readonly node: Node<unknown>
+  readonly input: I
+  readonly options: SchemaAST.ParseOptions
+  issues: Issues
+}
+
+interface Fork extends Accumulator<Struct> {
+  readonly out: Struct
+  readonly keys: ReadonlyArray<PropertyKey>
+  readonly children: ReadonlyArray<Node<unknown>>
+  readonly lists: ReadonlyArray<ReadonlyArray<PropertyKey>> | undefined
+}
+
+interface RecordFork extends Fork {
+  readonly node: Node<RecordPayload>
+}
+
+interface ArrayFork extends Accumulator<Elements> {
+  readonly node: Node<ArrayPayload>
+  readonly out: Array<unknown>
+  readonly len: number
+}
+
+type Item = Effect.Effect<void, Issue, unknown>
+
+function forkIssue<I>(s: Accumulator<I>, key: PropertyKey, exit: Exit.Failure<unknown, Issue>): Item {
+  const cause = exit.cause
+  if (cause.reasons.length === 0) return exitFailCause(cause)
+  const issue = getSchemaIssue(cause)
+  if (issue === undefined) return exitFailCause(pointCause(cause, s.node.ast, key, s.input, s.options))
+  const pointer = new SchemaIssue.Pointer([key], issue)
+  if (s.options.errors === "all") {
+    if (s.issues) s.issues.push(pointer)
+    else s.issues = [pointer]
+    return exitVoid
+  }
+  return exitFail(new SchemaIssue.Composite(s.node.ast, [pointer], s.input, s.options))
+}
+
+function forkMissing<I>(s: Accumulator<I>, key: PropertyKey, child: SchemaAST.AST): Item {
+  if (child.context?.isOptional) return exitVoid
+  const issue = new SchemaIssue.Pointer([key], new SchemaIssue.MissingKey(child.context?.annotations))
+  if (s.options.errors === "all") {
+    if (s.issues) s.issues.push(issue)
+    else s.issues = [issue]
+    return exitVoid
+  }
+  return exitFail(new SchemaIssue.Composite(s.node.ast, [issue], s.input, s.options))
+}
+
+function item(result: Pending, absorb: (exit: Exit.Exit<unknown, Issue>) => Item): Item {
+  return effectIsExit(result) ? absorb(result) : flatMap(exitEffect(result), absorb)
+}
+
+function failed(_: unknown, __: unknown, exit: Exit.Exit<void, Issue>): Exit.Exit<void, Issue> | undefined {
+  return exit._tag === "Failure" ? exit : undefined
+}
+
+const forkProperties = iterateConcurrent<Fork, PropertyKey>()({
+  onItem(s, key, i) {
+    const child = s.children[i]
+    if (!(key === "__proto__" ? Object.hasOwn(s.input, key) : key in s.input)) {
+      return item(decode(child, InternalParser.missing, s.options, false), (exit) => absorbProperty(s, i, key, exit))
+    }
+    const value = s.input[key]
+    InternalRecord.assignProperty(s.out, key, value)
+    return item(decode(child, value, s.options, false), (exit) => absorbProperty(s, i, key, exit))
+  },
+  step: failed
+})
+
+function absorbProperty(s: Fork, i: number, key: PropertyKey, exit: Exit.Exit<unknown, Issue>): Item {
+  if (exit._tag === "Failure") return forkIssue(s, key, exit)
+  if (exit === InternalParser.sameExit) return exitVoid
+  const value = exit.value
+  if (value !== InternalParser.missing) {
+    InternalRecord.assignProperty(s.out, key, value)
+    return exitVoid
+  }
+  delete s.out[key]
+  return forkMissing(s, key, s.children[i].ast)
+}
+
+function join<P, S extends Accumulator<unknown>>(
+  frame: FrameKind<P, unknown, S>,
+  node: Node<P>,
+  s: S,
+  eff: Item | undefined,
+  done: (node: Node<P>, s: S) => unknown
+): unknown {
+  if (eff === undefined) return done(node, s)
+  if (effectIsExit(eff)) return eff._tag === "Failure" ? failCause(eff.cause) : done(node, s)
+  spill(frame, node, s.input, s, 0, 0, undefined, undefined, CATCH | RESTART)
+  return suspendOn(eff)
+}
+
+function joined<P, S extends Accumulator<unknown>>(done: (node: Node<P>, s: S) => unknown): FrameKind<P, unknown, S> {
+  return {
+    resume(frame, result) {
+      const node = frame.node
+      const s = frame.out
+      pop()
+      return result === HALT ? HALT : done(node, s)
+    },
+    copy: identity
+  }
+}
+
+function forkDone(node: Node<unknown>, s: Fork): unknown {
+  if (s.issues) return failIssue(new SchemaIssue.Composite(node.ast, s.issues, s.input, s.options))
+  return finish(node, s.input, s.out)
+}
+
+const forkFrame = joined<unknown, Fork>(forkDone)
+
+function forkStruct(node: Node<StructPayload>, input: Struct, acc: Issues): unknown {
+  const options = rOptions
+  const p = node.p
+  const s: Fork = {
+    node,
+    input,
+    options,
+    issues: acc,
+    out: {},
+    keys: p.keys,
+    children: properties(p),
+    lists: undefined
+  }
+  let eff: Item | undefined
+  try {
+    eff = forkProperties(s, p.keys, { concurrency: resolveConcurrency(options.concurrency) })
+  } catch (error) {
+    return die(error)
+  }
+  return join(forkFrame, node, s, eff, forkDone)
+}
+
+function forkRecord(
+  node: Node<RecordPayload>,
+  input: Struct,
+  lists: ReadonlyArray<ReadonlyArray<PropertyKey>> | undefined,
+  acc: Issues
+): unknown {
+  const options = rOptions
+  const p = node.p
+  const s: RecordFork = { node, input, options, issues: acc, out: {}, keys: p.keys, children: p.children ?? [], lists }
+  let eff: Item | undefined
+  try {
+    if (p.keys.length > 0) eff = forkProperties(s, p.keys, { concurrency: resolveConcurrency(options.concurrency) })
+  } catch (error) {
+    return die(error)
+  }
+  return join(forkRecordFrame, node, s, eff, forkIndexes)
+}
+
+function forkIndexes(node: Node<RecordPayload>, s: RecordFork): unknown {
+  const p = node.p
+  const indexes = p.indexes ?? []
+  const pairs: Array<readonly [PropertyKey, IndexPlan]> = []
+  let eff: Item | undefined
+  try {
+    for (let i = 0; i < indexes.length; i++) {
+      const index = indexes[i]
+      const keys = s.lists?.[i] ?? (index.key === undefined
+        ? Object.keys(s.input)
+        : p.support.keys(s.input, index.parameter, s.options))
+      for (let j = 0; j < keys.length; j++) pairs.push([keys[j], index])
+    }
+    eff = forkEntries(s, pairs, { concurrency: resolveConcurrency(s.options.concurrency) })
+  } catch (error) {
+    return die(error)
+  }
+  return join(forkFrame, node, s, eff, forkDone)
+}
+
+const forkRecordFrame = joined<RecordPayload, RecordFork>(forkIndexes)
+
+const forkEntries = iterateConcurrent<RecordFork, readonly [PropertyKey, IndexPlan]>()({
+  onItem(s, [key, index]) {
+    const parser = index.key
+    if (parser === undefined) return forkValue(s, key, key, index)
+    return item(decode(parser, key, s.options, false), (exit) => {
+      if (exit._tag === "Failure") return forkIssue(s, key, exit)
+      return forkValue(s, key, exit === InternalParser.sameExit ? key : exit.value, index)
+    })
+  },
+  step: failed
+})
+
+function forkValue(s: RecordFork, key: PropertyKey, k2: unknown, index: IndexPlan): Item {
+  const input = s.input[key]
+  return item(decode(index.value, input, s.options, false), (exit) => {
+    if (exit._tag === "Failure") return forkIssue(s, key, exit)
+    const value = exit === InternalParser.sameExit ? input : exit.value
+    if (k2 !== InternalParser.missing && value !== InternalParser.missing) {
+      const name = propertyKey(k2)
+      const expected = s.node.p.expected
+      if (!(s.keys.length > 0 && (expected.has(key) || expected.has(typeof name === "number" ? String(name) : name)))) {
+        InternalRecord.assignProperty(s.out, name, value)
+      }
+    }
+    return exitVoid
+  })
+}
+
+const forkElements = iterateConcurrent<ArrayFork, unknown>()({
+  onItem(s, value, i) {
+    const child = elementAt(s.node.p, i, s.len)
+    return item(
+      decode(child, i < s.len ? value : InternalParser.missing, s.options, false),
+      (exit) => absorbElement(s, i, value, exit)
+    )
+  },
+  step: failed
+})
+
+function absorbElement(s: ArrayFork, i: number, input: unknown, exit: Exit.Exit<unknown, Issue>): Item {
+  if (exit._tag === "Failure") return forkIssue(s, i, exit)
+  const value = exit === InternalParser.sameExit ? input : exit.value
+  if (value !== InternalParser.missing) {
+    s.out[i] = value
+    return exitVoid
+  }
+  return forkMissing(s, i, elementAt(s.node.p, i, s.len).ast)
+}
+
+function forkArray(node: Node<ArrayPayload>, input: Elements, len: number): unknown {
+  const options = rOptions
+  const s: ArrayFork = { node, input, options, issues: undefined, out: new Array(len), len }
+  let eff: Item | undefined
+  try {
+    eff = forkElements(s, input, {
+      concurrency: resolveConcurrency(options.concurrency),
+      end: arrayEnd(node.p.arrays, len)
+    })
+  } catch (error) {
+    return die(error)
+  }
+  return join(forkArrayFrame, node, s, eff, forkArrayDone)
+}
+
+function forkArrayDone(node: Node<ArrayPayload>, s: ArrayFork): unknown {
+  let acc: Issues
+  try {
+    const excess = excessElements(node, s.input, s.len, s.issues)
+    if (excess === HALT) return HALT
+    acc = excess
+  } catch (error) {
+    return die(error)
+  }
+  if (acc) return failIssue(new SchemaIssue.Composite(node.ast, acc, s.input, s.options))
+  return finish(node, s.input, s.out)
+}
+
+const forkArrayFrame = joined<ArrayPayload, ArrayFork>(forkArrayDone)
+
 const recordFrame: FrameKind<RecordPayload, Struct, Struct> = {
   resume(frame, result) {
     const node = frame.node
@@ -1277,6 +1543,7 @@ function foldArray(node: Node<ArrayPayload>, input: unknown, depth: number): unk
   } catch (error) {
     return die(error)
   }
+  if (!sequential(rOptions)) return forkArray(node, input, len)
   return arrayLoop(node, input, new Array(len), 0, len, undefined, NONE, depth, CATCH | RESTART)
 }
 
@@ -1292,6 +1559,7 @@ function guardArray(node: Node<ArrayPayload>, input: unknown, depth: number): un
   } catch (error) {
     return die(error)
   }
+  if (!sequential(rOptions)) return forkArray(node, input, len)
   return arrayGuardLoop(node, input, 0, len, undefined, NONE, depth, CATCH | RESTART | GUARD)
 }
 

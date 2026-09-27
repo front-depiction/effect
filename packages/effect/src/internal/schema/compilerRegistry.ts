@@ -2,7 +2,6 @@ import * as Effect from "../../Effect.ts"
 import type { CompiledDecoder, Decode, Is, Make } from "../../schema/SchemaCompiler.ts"
 import type * as SchemaAST from "../../SchemaAST.ts"
 import type { Parser } from "../../SchemaParser.ts"
-import { resolveConcurrency } from "../effect.ts"
 import * as Interpreter from "./interpreter.ts"
 import * as Machine from "./machine.ts"
 import * as InternalParser from "./parser.ts"
@@ -68,9 +67,6 @@ const makeResolver: Machine.Resolver = {
   make: true
 }
 
-const isSequential = (options: SchemaAST.ParseOptions): boolean =>
-  options.concurrency === undefined || resolveConcurrency(options.concurrency) === 1
-
 /** @internal */
 export interface Entry {
   readonly ast: SchemaAST.AST
@@ -121,25 +117,21 @@ class InterpretedEntry implements Entry {
   get decodeEffect(): Parser {
     return this.cachedDecodeEffect ??= (input, options) => {
       const plan = this.plan
-      return plan !== null && isSequential(options)
-        ? Machine.decode(plan, input, options, false)
-        : this.closure(input, options)
+      return plan !== null ? Machine.decode(plan, input, options, false) : this.closure(input, options)
     }
   }
 
   get rootEffect(): Parser {
     return this.cachedRootEffect ??= (input, options) => {
       const plan = this.plan
-      return plan !== null && isSequential(options)
-        ? Machine.decode(plan, input, options, true)
-        : this.closure(input, options)
+      return plan !== null ? Machine.decode(plan, input, options, true) : this.closure(input, options)
     }
   }
 
   get guardEffect(): Parser {
     return this.cachedGuardEffect ??= (input, options) => {
       const plan = this.plan
-      return plan !== null && isSequential(options) ? Machine.guard(plan, input, options) : this.closure(input, options)
+      return plan !== null ? Machine.guard(plan, input, options) : this.closure(input, options)
     }
   }
 
@@ -163,9 +155,7 @@ class InterpretedEntry implements Entry {
   get makeEffect(): Parser {
     return this.cachedMakeEffect ??= (input, options) => {
       const plan = this.makePlan
-      return plan !== null && isSequential(options)
-        ? Machine.decode(plan, input, options, false)
-        : this.makeClosure(input, options)
+      return plan !== null ? Machine.decode(plan, input, options, false) : this.makeClosure(input, options)
     }
   }
 }
