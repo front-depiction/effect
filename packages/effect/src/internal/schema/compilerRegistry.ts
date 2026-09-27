@@ -53,7 +53,19 @@ const makeChild = (ast: SchemaAST.AST): Parser =>
 const makeField = (ast: SchemaAST.AST): Parser => Interpreter.compileField(ast, makeChild)
 
 const resolver: Machine.Resolver = {
-  node: (ast) => resolve(ast).node
+  node: (ast) => resolve(ast).node,
+  field: (ast) => resolve(ast).node,
+  make: false
+}
+
+const makeResolver: Machine.Resolver = {
+  node: (ast) => resolve(ast).makeNode,
+  field: (ast) => {
+    const node = resolve(ast).makeNode
+    const value = ast.context?.constructorDefault
+    return value === undefined ? node : Machine.defaultNode(ast, value, node)
+  },
+  make: true
 }
 
 const isSequential = (options: SchemaAST.ParseOptions): boolean =>
@@ -71,6 +83,7 @@ export interface Entry {
   readonly parser: Parser
   readonly makeEffect: Parser
   readonly node: Machine.Node<unknown>
+  readonly makeNode: Machine.Node<unknown>
   readonly rootEffect: Parser
   readonly guardEffect: Parser
 }
@@ -84,6 +97,9 @@ class InterpretedEntry implements Entry {
   declare private cachedNode: Machine.Node<unknown> | undefined
   declare private cachedPlan: Machine.Node<unknown> | null | undefined
   declare private cachedClosure: Parser | undefined
+  declare private cachedMakePlan: Machine.Node<unknown> | null | undefined
+  declare private cachedMakeNode: Machine.Node<unknown> | undefined
+  declare private cachedMakeClosure: Parser | undefined
 
   constructor(ast: SchemaAST.AST) {
     this.ast = ast
@@ -131,8 +147,26 @@ class InterpretedEntry implements Entry {
     return this.decodeEffect
   }
 
+  get makePlan(): Machine.Node<unknown> | null {
+    if (this.cachedMakePlan === undefined) this.cachedMakePlan = Machine.build(this.ast, makeResolver) ?? null
+    return this.cachedMakePlan
+  }
+
+  get makeNode(): Machine.Node<unknown> {
+    return this.cachedMakeNode ??= this.makePlan ?? Machine.foreign(this.ast, () => this.makeClosure)
+  }
+
+  get makeClosure(): Parser {
+    return this.cachedMakeClosure ??= Interpreter.compile(this.ast, makeChild, makeField)
+  }
+
   get makeEffect(): Parser {
-    return this.cachedMakeEffect ??= Interpreter.compile(this.ast, makeChild, makeField)
+    return this.cachedMakeEffect ??= (input, options) => {
+      const plan = this.makePlan
+      return plan !== null && isSequential(options)
+        ? Machine.decode(plan, input, options, false)
+        : this.makeClosure(input, options)
+    }
   }
 }
 
@@ -158,6 +192,10 @@ class CompilerEntry extends InterpretedEntry {
 
   override get node(): Machine.Node<unknown> {
     return this.save("node", Machine.foreign(this.ast, () => this.parser))
+  }
+
+  override get makeNode(): Machine.Node<unknown> {
+    return this.save("makeNode", Machine.foreign(this.ast, () => this.makeEffect))
   }
 
   override get rootEffect(): Parser {

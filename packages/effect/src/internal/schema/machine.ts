@@ -651,6 +651,8 @@ const foreignKind: Kind<ForeignPayload> = { fold: foldForeign, guard: foldForeig
 /** @internal */
 export interface Resolver {
   readonly node: (ast: SchemaAST.AST) => Node<unknown>
+  readonly field: (ast: SchemaAST.AST) => Node<unknown>
+  readonly make: boolean
 }
 
 /** @internal */
@@ -737,7 +739,8 @@ export const unionNode = (
     candidates,
     members: [],
     index: undefined,
-    oneOf: ast.options?.mode === "oneOf"
+    oneOf: ast.options?.mode === "oneOf",
+    make: resolver.make
   })
 
 /** @internal */
@@ -745,8 +748,16 @@ export const suspendNode = (ast: SchemaAST.Suspend, resolver: Resolver): Node<un
   node(suspendKind, ast, { thunk: ast.thunk, resolver, target: undefined })
 
 /** @internal */
-export function declarationNode(ast: SchemaAST.Declaration, resolver: Resolver): Node<unknown> {
+export function declarationNode(
+  ast: SchemaAST.Declaration,
+  resolver: Resolver,
+  descriptorOf: (ast: SchemaAST.AST) => SchemaAST.ConstructorDescriptor | undefined
+): Node<unknown> {
   for (const parameter of ast.typeParameters) resolver.node(parameter)
+  const descriptor = resolver.make ? descriptorOf(ast) : undefined
+  if (descriptor !== undefined) {
+    return new Node(constructorKind, ast, ast.checks, ast.encodingChecks, { descriptor, resolver, source: undefined })
+  }
   return new Node(declarationKind, ast, ast.checks, ast.encodingChecks, { declaration: ast, run: undefined })
 }
 
@@ -803,7 +814,7 @@ function properties(p: StructPayload): ReadonlyArray<Node<unknown>> {
 
 function resolveProperties(p: StructPayload): ReadonlyArray<Node<unknown>> {
   const resolver = p.resolver
-  return p.children = p.objects.propertySignatures.map((ps) => resolver.node(ps.type))
+  return p.children = p.objects.propertySignatures.map((ps) => resolver.field(ps.type))
 }
 
 type Struct = Record<PropertyKey, unknown>
@@ -1028,11 +1039,11 @@ export function recordNode(ast: SchemaAST.Objects, resolver: Resolver, support: 
 function resolveRecord(p: RecordPayload): ReadonlyArray<IndexPlan> {
   if (p.indexes !== undefined) return p.indexes
   const resolver = p.resolver
-  p.children = p.objects.propertySignatures.map((ps) => resolver.node(ps.type))
+  p.children = p.objects.propertySignatures.map((ps) => resolver.field(ps.type))
   return p.indexes = p.objects.indexSignatures.map((is) => ({
     parameter: is.parameter,
     key: is.parameter === p.support.string ? undefined : resolver.node(p.support.key(is.parameter)),
-    value: resolver.node(is.type)
+    value: resolver.field(is.type)
   }))
 }
 
@@ -1235,8 +1246,8 @@ type Elements = ReadonlyArray<unknown>
 
 function resolveElements(p: ArrayPayload): void {
   if (p.elements === undefined) {
-    p.elements = p.arrays.elements.map(p.resolver.node)
-    p.rest = p.arrays.rest.map(p.resolver.node)
+    p.elements = p.arrays.elements.map(p.resolver.field)
+    p.rest = p.arrays.rest.map(p.resolver.field)
   }
 }
 
@@ -1432,6 +1443,7 @@ interface UnionPayload {
   readonly members: Array<Node<unknown>>
   index: SchemaAST.CandidateIndex | undefined
   readonly oneOf: boolean
+  readonly make: boolean
 }
 
 function member(p: UnionPayload, i: number): Node<unknown> {
@@ -1442,7 +1454,7 @@ function foldUnion(node: Node<UnionPayload>, input: unknown, depth: number): unk
   if (input === InternalParser.missing) return input
   if (depth >= LIMIT) return descend(node, input, DESCEND)
   const p = node.p
-  const candidates = (p.index ??= p.candidates(p.union.types))(input, false)
+  const candidates = (p.index ??= p.candidates(p.union.types))(input, p.make)
   if (candidates.length === 0) return failIssue(new SchemaIssue.AnyOf(p.union, [], input, rOptions))
   if (candidates.length === 1) {
     const child = member(p, candidates[0])
@@ -1456,7 +1468,7 @@ function guardUnion(node: Node<UnionPayload>, input: unknown, depth: number): un
   if (input === InternalParser.missing) return input
   if (depth >= LIMIT) return descend(node, input, DESCEND_GUARD)
   const p = node.p
-  const candidates = (p.index ??= p.candidates(p.union.types))(input, false)
+  const candidates = (p.index ??= p.candidates(p.union.types))(input, p.make)
   if (candidates.length === 0) return failIssue(new SchemaIssue.AnyOf(p.union, [], input, rOptions))
   if (candidates.length === 1) {
     const child = member(p, candidates[0])
@@ -1647,6 +1659,73 @@ function resolveRun(p: DeclarationPayload): ReturnType<SchemaAST.Declaration["ru
 
 const declarationKind: Kind<DeclarationPayload> = { fold: foldDeclaration, guard: foldDeclaration }
 
+interface ConstructorPayload {
+  readonly descriptor: SchemaAST.ConstructorDescriptor
+  readonly resolver: Resolver
+  source: Node<unknown> | undefined
+}
+
+function foldConstructor(node: Node<ConstructorPayload>, input: unknown, depth: number): unknown {
+  if (input === InternalParser.missing) return input
+  const p = node.p
+  if (p.descriptor.isConstructed(input)) return finish(node, input, input)
+  const source = p.source ?? resolveSource(p)
+  return constructed(node, input, source.kind.fold(source, input, depth + 1))
+}
+
+function resolveSource(p: ConstructorPayload): Node<unknown> {
+  const link = p.descriptor.link
+  return p.source = chain(link.to, [link], undefined, false, p.resolver)
+}
+
+function constructed(node: Node<ConstructorPayload>, input: unknown, result: unknown): unknown {
+  if (result !== HALT) return finish(node, input, result)
+  if (rStatus >= SUSPEND) return spill(constructorFrame, node, input, undefined, 0, 0, undefined, undefined, 0)
+  return HALT
+}
+
+const constructorKind: Kind<ConstructorPayload> = { fold: foldConstructor, guard: foldConstructor }
+
+const constructorFrame: FrameKind<ConstructorPayload, unknown, undefined> = {
+  resume(frame, result) {
+    const node = frame.node
+    const input = frame.input
+    pop()
+    return constructed(node, input, result)
+  },
+  copy: identity
+}
+
+interface DefaultPayload {
+  readonly value: Pending
+  readonly inner: Node<unknown>
+}
+
+/** @internal */
+export const defaultNode = (ast: SchemaAST.AST, value: Pending, inner: Node<unknown>): Node<unknown> =>
+  new Node(defaultKind, ast, undefined, undefined, { value, inner })
+
+function foldDefault(node: Node<DefaultPayload>, input: unknown, depth: number): unknown {
+  const p = node.p
+  const inner = p.inner
+  if (input !== InternalParser.missing && input !== undefined) return inner.kind.fold(inner, input, depth + 1)
+  const value = p.value
+  if (effectIsExit(value) && value._tag === "Success") return inner.kind.fold(inner, value.value, depth + 1)
+  spill(defaultFrame, node, input, undefined, 0, 0, undefined, undefined, 0)
+  return suspendOn(wrapEncoding(value, node.ast, input, rOptions))
+}
+
+const defaultKind: Kind<DefaultPayload> = { fold: foldDefault, guard: foldDefault }
+
+const defaultFrame: FrameKind<DefaultPayload, unknown, undefined> = {
+  resume(frame, result) {
+    const inner = frame.node.p.inner
+    pop()
+    return result === HALT ? HALT : inner.kind.fold(inner, result, 0)
+  },
+  copy: identity
+}
+
 function foldTemplate(node: Node<Node<unknown>>, input: unknown, depth: number): unknown {
   if (input === InternalParser.missing) return input
   if (depth >= LIMIT) return descend(node, input, DESCEND)
@@ -1786,7 +1865,7 @@ function linkAfter(node: Node<LinkPayload>, input: unknown, i: number, result: u
 }
 
 function wrapEncoding(
-  failure: Exit.Exit<never, Issue>,
+  failure: Pending,
   ast: SchemaAST.AST,
   input: unknown,
   options: SchemaAST.ParseOptions

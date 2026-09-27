@@ -790,7 +790,7 @@ export const Declaration: new(
   }
   /** @internal */
   override getNode(resolver: Machine.Resolver): Machine.Node<unknown> {
-    return Machine.declarationNode(this, resolver)
+    return Machine.declarationNode(this, resolver, getConstructorDescriptor)
   }
   /** @internal */
   getParser(): SchemaParser.Parser {
