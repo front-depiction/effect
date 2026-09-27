@@ -53,8 +53,7 @@ const makeChild = (ast: SchemaAST.AST): Parser =>
 const makeField = (ast: SchemaAST.AST): Parser => Interpreter.compileField(ast, makeChild)
 
 const resolver: Machine.Resolver = {
-  node: (ast) => resolve(ast).node,
-  whole: (ast) => Interpreter.compile(ast, decodeChild)
+  node: (ast) => resolve(ast).node
 }
 
 const isSequential = (options: SchemaAST.ParseOptions): boolean =>

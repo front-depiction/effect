@@ -15,6 +15,7 @@ import {
   failCauseSync,
   findError,
   flatMap,
+  mapEager,
   suspend
 } from "../effect.ts"
 import * as InternalRecord from "../record.ts"
@@ -650,7 +651,6 @@ const foreignKind: Kind<ForeignPayload> = { fold: foldForeign, guard: foldForeig
 /** @internal */
 export interface Resolver {
   readonly node: (ast: SchemaAST.AST) => Node<unknown>
-  readonly whole: (ast: SchemaAST.AST) => Parser
 }
 
 /** @internal */
@@ -756,15 +756,37 @@ export const templateNode = (ast: SchemaAST.TemplateLiteral, inner: Node<unknown
 
 /** @internal */
 export function linkNode(ast: SchemaAST.AST, encoding: SchemaAST.Encoding, resolver: Resolver): Node<unknown> {
-  const steps: Array<Getter> = []
-  for (const link of encoding) {
-    const transformation = link.transformation
-    if (transformation._tag === "Middleware") return foreign(ast, () => resolver.whole(ast))
-    steps.push(transformation.decode)
-  }
   const local = ast.getNode(resolver)
   if (!(local instanceof Node)) return local
-  return new Node(linkKind, ast, undefined, undefined, { steps, links: encoding, resolver, parsers: undefined, local })
+  return chain(ast, encoding, local, true, resolver)
+}
+
+function chain(
+  ast: SchemaAST.AST,
+  links: ReadonlyArray<SchemaAST.Link>,
+  local: Node<unknown> | undefined,
+  wrap: boolean,
+  resolver: Resolver
+): Node<unknown> {
+  const steps: Array<Getter> = []
+  for (let i = 0; i < links.length; i++) {
+    const transformation = links[i].transformation
+    if (transformation._tag === "Middleware") {
+      return new Node(middlewareKind, ast, undefined, undefined, {
+        steps,
+        links,
+        resolver,
+        parsers: undefined,
+        local,
+        wrap,
+        middleware: transformation,
+        at: i,
+        prefix: undefined
+      })
+    }
+    steps.push(transformation.decode)
+  }
+  return new Node(linkKind, ast, undefined, undefined, { steps, links, resolver, parsers: undefined, local, wrap })
 }
 
 interface StructPayload {
@@ -1659,10 +1681,19 @@ type Getter = SchemaGetter.Getter<unknown, unknown, unknown>
 
 interface LinkPayload {
   readonly steps: ReadonlyArray<Getter>
-  readonly links: SchemaAST.Encoding
+  readonly links: ReadonlyArray<SchemaAST.Link>
   readonly resolver: Resolver
   parsers: ReadonlyArray<Node<unknown>> | undefined
-  readonly local: Node<unknown>
+  readonly local: Node<unknown> | undefined
+  readonly wrap: boolean
+}
+
+type Middleware = Extract<SchemaAST.Link["transformation"], { readonly _tag: "Middleware" }>
+
+interface MiddlewarePayload extends LinkPayload {
+  readonly middleware: Middleware
+  readonly at: number
+  prefix: Node<unknown> | undefined
 }
 
 function linkParsers(p: LinkPayload): ReadonlyArray<Node<unknown>> {
@@ -1743,10 +1774,12 @@ function linkAfter(node: Node<LinkPayload>, input: unknown, i: number, result: u
   }
   if (result !== HALT) {
     const local = node.p.local
+    if (local === undefined) return result
     const value = local.kind.fold(local, result, depth + 1)
     if (spilled(value)) return spill(linkLocalFrame, node, input, undefined, 0, 0, undefined, undefined, 0)
     return value
   }
+  if (!node.p.wrap) return HALT
   const failure = failureExit()
   spill(linkWrapFrame, node, input, undefined, 0, 0, undefined, undefined, 0)
   return suspendOn(wrapEncoding(failure, node.ast, input, rOptions))
@@ -1765,6 +1798,39 @@ function wrapEncoding(
 }
 
 const linkKind: Kind<LinkPayload> = { fold: foldLink, guard: foldLink }
+
+function foldMiddleware(node: Node<MiddlewarePayload>, input: unknown, depth: number): unknown {
+  if (depth >= LIMIT) return descend(node, input, DESCEND)
+  const p = node.p
+  const options = rOptions
+  const upstream = decode(p.prefix ?? resolvePrefix(p), input, options, false)
+  const transformed = p.middleware.decode(
+    upstream === InternalParser.sameExit
+      ? exitSucceed(InternalParser.toOption(input))
+      : mapEager(upstream, InternalParser.toOption),
+    options
+  )
+  if (effectIsExit(transformed)) {
+    const result = transformed._tag === "Success"
+      ? deliver(InternalParser.fromOptionExit(transformed.value), undefined)
+      : failCause(transformed.cause)
+    return linkAfter(node, input, p.at, result, depth)
+  }
+  spill(linkEffectFrame, node, input, undefined, p.at, 0, undefined, undefined, 0)
+  return suspendOn(flatMap(transformed, InternalParser.fromOptionExit))
+}
+
+function resolvePrefix(p: MiddlewarePayload): Node<unknown> {
+  const links = p.links
+  const at = p.at
+  const resolver = p.resolver
+  const to = links[at].to
+  return p.prefix = at === links.length - 1
+    ? resolver.node(to)
+    : chain(to, links.slice(at + 1), resolver.node(to), false, resolver)
+}
+
+const middlewareKind: Kind<MiddlewarePayload> = { fold: foldMiddleware, guard: foldMiddleware }
 
 const linkParseFrame: FrameKind<LinkPayload, unknown, undefined> = {
   resume(frame, result) {
