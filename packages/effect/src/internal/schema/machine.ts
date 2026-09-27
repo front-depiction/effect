@@ -82,6 +82,20 @@ export class Node<P> {
     this.encodingChecks = encodingChecks
     this.p = p
   }
+  run(input: unknown, options: SchemaAST.ParseOptions): Pending {
+    const result = decode(this, input, options, false)
+    return result === InternalParser.sameExit ? exitSucceed(input) : result
+  }
+}
+
+interface Runnable {
+  readonly ast: SchemaAST.AST
+  run(input: unknown, options: SchemaAST.ParseOptions): Pending
+}
+
+function own(node: Node<unknown>): Node<unknown> {
+  const runnable: Runnable = node
+  return node instanceof Node ? node : foreign(runnable.ast, () => (input, options) => runnable.run(input, options))
 }
 
 interface FrameKind<P, I, O> {
@@ -645,8 +659,12 @@ function foldForeign(node: Node<ForeignPayload>, input: unknown, depth: number):
   const parser = p.parser ??= p.get()
   const result = parser(input, rOptions)
   if (!effectIsExit(result)) return suspendAt(node, input, result)
-  if (depth === 0) rResult = result
-  return deliver(result, input)
+  if (node.checks === undefined && node.encodingChecks === undefined) {
+    if (depth === 0) rResult = result
+    return deliver(result, input)
+  }
+  const value = deliver(result, input)
+  return value === HALT ? HALT : complete(node, input, value)
 }
 
 const foreignKind: Kind<ForeignPayload> = { fold: foldForeign, guard: foldForeign }
@@ -664,10 +682,42 @@ export function foreign(ast: SchemaAST.AST, get: () => Parser): Node<unknown> {
 }
 
 /** @internal */
-export function build(ast: SchemaAST.AST, resolver: Resolver): Node<unknown> | undefined {
+export function checked(ast: SchemaAST.AST, get: () => Parser): Node<unknown> {
+  return new Node(foreignKind, ast, ast.checks, "encodingChecks" in ast ? ast.encodingChecks : undefined, {
+    get,
+    parser: undefined
+  })
+}
+
+/** @internal */
+export function build(ast: SchemaAST.AST, resolver: Resolver): Node<unknown> {
   const encoding = ast.encoding
-  const built = encoding === undefined ? ast.getNode(resolver) : encoding[0].getNode(ast, encoding, resolver)
-  return built instanceof Node ? built : undefined
+  return own(encoding === undefined ? ast.getParser(resolver) : encoding[0].getNode(ast, encoding, resolver))
+}
+
+/** @internal */
+export function local(ast: SchemaAST.AST, resolver: Resolver): Node<unknown> {
+  return own(ast.getParser(resolver))
+}
+
+/** @internal */
+export function bare(node: Node<unknown>): Node<unknown> {
+  return new Node(node.kind, node.ast, undefined, undefined, node.p)
+}
+
+/** @internal */
+export function linkOver(
+  ast: SchemaAST.AST,
+  encoding: SchemaAST.Encoding,
+  local: Node<unknown>,
+  resolver: Resolver
+): Node<unknown> {
+  return chain(ast, encoding, local, true, resolver)
+}
+
+/** @internal */
+export function parser(node: Node<unknown>): Parser {
+  return (input, options) => decode(node, input, options, false)
 }
 
 function node<P>(kind: Kind<P>, ast: SchemaAST.AST, p: P): Node<unknown> {
@@ -712,13 +762,17 @@ export const enumNode = (ast: SchemaAST.Enum): Node<unknown> =>
 /** @internal */
 export function objectsNode(ast: SchemaAST.Objects, resolver: Resolver): Node<unknown> {
   if (ast.propertySignatures.length === 0) return node(notNullishKind, ast, undefined)
-  return new Node(structKind, ast, ast.checks, ast.encodingChecks, {
+  return new Node(structKind, ast, ast.checks, ast.encodingChecks, structPayload(ast, resolver))
+}
+
+function structPayload(ast: SchemaAST.Objects, resolver: Resolver): StructPayload {
+  return {
     objects: ast,
     resolver,
     keys: ast.propertySignatures.map((ps) => ps.name),
     expected: new Set(ast.propertySignatures.map((ps) => typeof ps.name === "number" ? String(ps.name) : ps.name)),
     children: undefined
-  })
+  }
 }
 
 /** @internal */
@@ -766,11 +820,11 @@ export function declarationNode(
 
 /** @internal */
 export const templateNode = (ast: SchemaAST.TemplateLiteral, inner: Node<unknown>): Node<unknown> =>
-  node(templateKind, ast, inner)
+  node(templateKind, ast, own(inner))
 
 /** @internal */
 export function linkNode(ast: SchemaAST.AST, encoding: SchemaAST.Encoding, resolver: Resolver): Node<unknown> {
-  const local = ast.getNode(resolver)
+  const local = ast.getParser(resolver)
   if (!(local instanceof Node)) return local
   return chain(ast, encoding, local, true, resolver)
 }
@@ -817,7 +871,7 @@ function properties(p: StructPayload): ReadonlyArray<Node<unknown>> {
 
 function resolveProperties(p: StructPayload): ReadonlyArray<Node<unknown>> {
   const resolver = p.resolver
-  return p.children = p.objects.propertySignatures.map((ps) => resolver.field(ps.type))
+  return p.children = p.objects.propertySignatures.map((ps) => own(resolver.field(ps.type)))
 }
 
 type Struct = Record<PropertyKey, unknown>
@@ -973,6 +1027,28 @@ function structGuardLoop(
 
 const structKind: Kind<StructPayload> = { fold: foldStruct, guard: guardStruct }
 
+/** @internal */
+export function structResumer(
+  ast: SchemaAST.Objects,
+  resolver: Resolver
+): (input: Struct, out: Struct, from: number, options: SchemaAST.ParseOptions) => Pending {
+  const node: Node<StructPayload> = new Node(structKind, ast, undefined, undefined, structPayload(ast, resolver))
+  return (input, out, from, options) => {
+    const previous = rOptions
+    rOptions = options
+    const base = sp
+    let result: unknown
+    try {
+      result = structLoop(node, input, out, from, undefined, NONE, 0, CATCH)
+    } catch (error) {
+      result = unwind(base, error, previous, false)
+    }
+    if (result === HALT) result = drive(base, base, result, previous, false)
+    rOptions = previous
+    return release(settle(base, result, options))
+  }
+}
+
 const structFrame: FrameKind<StructPayload, Struct, Struct> = {
   resume(frame, result) {
     const node = frame.node
@@ -1043,11 +1119,11 @@ export function recordNode(ast: SchemaAST.Objects, resolver: Resolver, support: 
 function resolveRecord(p: RecordPayload): ReadonlyArray<IndexPlan> {
   if (p.indexes !== undefined) return p.indexes
   const resolver = p.resolver
-  p.children = p.objects.propertySignatures.map((ps) => resolver.field(ps.type))
+  p.children = p.objects.propertySignatures.map((ps) => own(resolver.field(ps.type)))
   return p.indexes = p.objects.indexSignatures.map((is) => ({
     parameter: is.parameter,
-    key: is.parameter === p.support.string ? undefined : resolver.node(p.support.key(is.parameter)),
-    value: resolver.field(is.type)
+    key: is.parameter === p.support.string ? undefined : own(resolver.node(p.support.key(is.parameter))),
+    value: own(resolver.field(is.type))
   }))
 }
 
@@ -1211,8 +1287,9 @@ function sequential(options: SchemaAST.ParseOptions): boolean {
   return options.concurrency === undefined || resolveConcurrency(options.concurrency) === 1
 }
 
-interface Accumulator<I> {
-  readonly node: Node<unknown>
+/** @internal */
+export interface Accumulator<I> {
+  readonly ast: SchemaAST.AST
   readonly input: I
   readonly options: SchemaAST.ParseOptions
   issues: Issues
@@ -1237,29 +1314,68 @@ interface ArrayFork extends Accumulator<Elements> {
 
 type Item = Effect.Effect<void, Issue, unknown>
 
-function forkIssue<I>(s: Accumulator<I>, key: PropertyKey, exit: Exit.Failure<unknown, Issue>): Item {
+type Terminal = Exit.Exit<void, Issue> | undefined
+
+function stepFailure<I>(s: Accumulator<I>, key: PropertyKey, exit: Exit.Failure<unknown, Issue>): Terminal {
   const cause = exit.cause
   if (cause.reasons.length === 0) return exitFailCause(cause)
   const issue = getSchemaIssue(cause)
-  if (issue === undefined) return exitFailCause(pointCause(cause, s.node.ast, key, s.input, s.options))
+  if (issue === undefined) return exitFailCause(pointCause(cause, s.ast, key, s.input, s.options))
   const pointer = new SchemaIssue.Pointer([key], issue)
   if (s.options.errors === "all") {
     if (s.issues) s.issues.push(pointer)
     else s.issues = [pointer]
-    return exitVoid
+    return undefined
   }
-  return exitFail(new SchemaIssue.Composite(s.node.ast, [pointer], s.input, s.options))
+  return exitFail(new SchemaIssue.Composite(s.ast, [pointer], s.input, s.options))
 }
 
-function forkMissing<I>(s: Accumulator<I>, key: PropertyKey, child: SchemaAST.AST): Item {
-  if (child.context?.isOptional) return exitVoid
+function stepMissing<I>(s: Accumulator<I>, key: PropertyKey, child: SchemaAST.AST): Terminal {
+  if (child.context?.isOptional) return undefined
   const issue = new SchemaIssue.Pointer([key], new SchemaIssue.MissingKey(child.context?.annotations))
   if (s.options.errors === "all") {
     if (s.issues) s.issues.push(issue)
     else s.issues = [issue]
-    return exitVoid
+    return undefined
   }
-  return exitFail(new SchemaIssue.Composite(s.node.ast, [issue], s.input, s.options))
+  return exitFail(new SchemaIssue.Composite(s.ast, [issue], s.input, s.options))
+}
+
+/** @internal */
+export function stepKey(
+  s: Accumulator<Struct>,
+  out: Struct,
+  key: PropertyKey,
+  child: SchemaAST.AST,
+  exit: Exit.Exit<unknown, Issue>
+): Terminal {
+  if (exit._tag === "Failure") return stepFailure(s, key, exit)
+  if (exit === InternalParser.sameExit) return undefined
+  const value = exit.value
+  if (value !== InternalParser.missing) {
+    InternalRecord.assignProperty(out, key, value)
+    return undefined
+  }
+  delete out[key]
+  return stepMissing(s, key, child)
+}
+
+/** @internal */
+export function stepIndex(
+  s: Accumulator<Elements>,
+  out: Array<unknown>,
+  i: number,
+  input: unknown,
+  child: SchemaAST.AST,
+  exit: Exit.Exit<unknown, Issue>
+): Terminal {
+  if (exit._tag === "Failure") return stepFailure(s, i, exit)
+  const value = exit === InternalParser.sameExit ? input : exit.value
+  if (value !== InternalParser.missing) {
+    out[i] = value
+    return undefined
+  }
+  return stepMissing(s, i, child)
 }
 
 function item(result: Pending, absorb: (exit: Exit.Exit<unknown, Issue>) => Item): Item {
@@ -1284,15 +1400,7 @@ const forkProperties = iterateConcurrent<Fork, PropertyKey>()({
 })
 
 function absorbProperty(s: Fork, i: number, key: PropertyKey, exit: Exit.Exit<unknown, Issue>): Item {
-  if (exit._tag === "Failure") return forkIssue(s, key, exit)
-  if (exit === InternalParser.sameExit) return exitVoid
-  const value = exit.value
-  if (value !== InternalParser.missing) {
-    InternalRecord.assignProperty(s.out, key, value)
-    return exitVoid
-  }
-  delete s.out[key]
-  return forkMissing(s, key, s.children[i].ast)
+  return stepKey(s, s.out, key, s.children[i].ast, exit) ?? exitVoid
 }
 
 function join<P, S extends Accumulator<unknown>>(
@@ -1331,7 +1439,7 @@ function forkStruct(node: Node<StructPayload>, input: Struct, acc: Issues): unkn
   const options = rOptions
   const p = node.p
   const s: Fork = {
-    node,
+    ast: node.ast,
     input,
     options,
     issues: acc,
@@ -1357,7 +1465,17 @@ function forkRecord(
 ): unknown {
   const options = rOptions
   const p = node.p
-  const s: RecordFork = { node, input, options, issues: acc, out: {}, keys: p.keys, children: p.children ?? [], lists }
+  const s: RecordFork = {
+    ast: node.ast,
+    node,
+    input,
+    options,
+    issues: acc,
+    out: {},
+    keys: p.keys,
+    children: p.children ?? [],
+    lists
+  }
   let eff: Item | undefined
   try {
     if (p.keys.length > 0) eff = forkProperties(s, p.keys, { concurrency: resolveConcurrency(options.concurrency) })
@@ -1394,7 +1512,7 @@ const forkEntries = iterateConcurrent<RecordFork, readonly [PropertyKey, IndexPl
     const parser = index.key
     if (parser === undefined) return forkValue(s, key, key, index)
     return item(decode(parser, key, s.options, false), (exit) => {
-      if (exit._tag === "Failure") return forkIssue(s, key, exit)
+      if (exit._tag === "Failure") return stepFailure(s, key, exit) ?? exitVoid
       return forkValue(s, key, exit === InternalParser.sameExit ? key : exit.value, index)
     })
   },
@@ -1404,7 +1522,7 @@ const forkEntries = iterateConcurrent<RecordFork, readonly [PropertyKey, IndexPl
 function forkValue(s: RecordFork, key: PropertyKey, k2: unknown, index: IndexPlan): Item {
   const input = s.input[key]
   return item(decode(index.value, input, s.options, false), (exit) => {
-    if (exit._tag === "Failure") return forkIssue(s, key, exit)
+    if (exit._tag === "Failure") return stepFailure(s, key, exit) ?? exitVoid
     const value = exit === InternalParser.sameExit ? input : exit.value
     if (k2 !== InternalParser.missing && value !== InternalParser.missing) {
       const name = propertyKey(k2)
@@ -1429,18 +1547,12 @@ const forkElements = iterateConcurrent<ArrayFork, unknown>()({
 })
 
 function absorbElement(s: ArrayFork, i: number, input: unknown, exit: Exit.Exit<unknown, Issue>): Item {
-  if (exit._tag === "Failure") return forkIssue(s, i, exit)
-  const value = exit === InternalParser.sameExit ? input : exit.value
-  if (value !== InternalParser.missing) {
-    s.out[i] = value
-    return exitVoid
-  }
-  return forkMissing(s, i, elementAt(s.node.p, i, s.len).ast)
+  return stepIndex(s, s.out, i, input, elementAt(s.node.p, i, s.len).ast, exit) ?? exitVoid
 }
 
 function forkArray(node: Node<ArrayPayload>, input: Elements, len: number): unknown {
   const options = rOptions
-  const s: ArrayFork = { node, input, options, issues: undefined, out: new Array(len), len }
+  const s: ArrayFork = { ast: node.ast, node, input, options, issues: undefined, out: new Array(len), len }
   let eff: Item | undefined
   try {
     eff = forkElements(s, input, {
@@ -1512,8 +1624,9 @@ type Elements = ReadonlyArray<unknown>
 
 function resolveElements(p: ArrayPayload): void {
   if (p.elements === undefined) {
-    p.elements = p.arrays.elements.map(p.resolver.field)
-    p.rest = p.arrays.rest.map(p.resolver.field)
+    const resolver = p.resolver
+    p.elements = p.arrays.elements.map((ast) => own(resolver.field(ast)))
+    p.rest = p.arrays.rest.map((ast) => own(resolver.field(ast)))
   }
 }
 
@@ -1715,7 +1828,7 @@ interface UnionPayload {
 }
 
 function member(p: UnionPayload, i: number): Node<unknown> {
-  return p.members[i] ??= p.resolver.node(p.union.types[i])
+  return p.members[i] ??= own(p.resolver.node(p.union.types[i]))
 }
 
 function foldUnion(node: Node<UnionPayload>, input: unknown, depth: number): unknown {
@@ -1893,7 +2006,7 @@ const suspendKind: Kind<SuspendPayload> = {
 function resolveTarget(p: SuspendPayload): Node<unknown> {
   let target: Node<unknown>
   try {
-    target = p.resolver.node(p.thunk())
+    target = own(p.resolver.node(p.thunk()))
   } catch (error) {
     return planned(error)
   }
@@ -1971,7 +2084,7 @@ interface DefaultPayload {
 
 /** @internal */
 export const defaultNode = (ast: SchemaAST.AST, value: Pending, inner: Node<unknown>): Node<unknown> =>
-  new Node(defaultKind, ast, undefined, undefined, { value, inner })
+  new Node(defaultKind, ast, undefined, undefined, { value, inner: own(inner) })
 
 function foldDefault(node: Node<DefaultPayload>, input: unknown, depth: number): unknown {
   const p = node.p
@@ -2049,7 +2162,7 @@ function linkParsers(p: LinkPayload): ReadonlyArray<Node<unknown>> {
 
 function resolveLinkParsers(p: LinkPayload): ReadonlyArray<Node<unknown>> {
   const resolver = p.resolver
-  return p.parsers = p.links.map((link) => resolver.node(link.to))
+  return p.parsers = p.links.map((link) => own(resolver.node(link.to)))
 }
 
 function foldLink(node: Node<LinkPayload>, input: unknown, depth: number): unknown {
@@ -2132,7 +2245,8 @@ function linkAfter(node: Node<LinkPayload>, input: unknown, i: number, result: u
   return suspendOn(wrapEncoding(failure, node.ast, input, rOptions))
 }
 
-function wrapEncoding(
+/** @internal */
+export function wrapEncoding(
   failure: Pending,
   ast: SchemaAST.AST,
   input: unknown,
@@ -2173,8 +2287,8 @@ function resolvePrefix(p: MiddlewarePayload): Node<unknown> {
   const resolver = p.resolver
   const to = links[at].to
   return p.prefix = at === links.length - 1
-    ? resolver.node(to)
-    : chain(to, links.slice(at + 1), resolver.node(to), false, resolver)
+    ? own(resolver.node(to))
+    : chain(to, links.slice(at + 1), own(resolver.node(to)), false, resolver)
 }
 
 const middlewareKind: Kind<MiddlewarePayload> = { fold: foldMiddleware, guard: foldMiddleware }

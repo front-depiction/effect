@@ -5027,49 +5027,6 @@ type IterateOptions<S, A, X, E, R, E2> = {
   readonly step: (state: NoInfer<S>, item: A, exit: Exit.Exit<X, E>, index: number) => Exit.Exit<void, E2> | void
 }
 
-/** @internal */
-export const iterateEager = <S, A>() =>
-<X, E, R, E2>(options: IterateOptions<S, A, X, E, R, E2>): (
-  initialState: S,
-  items: ReadonlyArray<A>,
-  start?: number,
-  end?: number
-) => Effect.Effect<void, E | E2, R> | undefined => {
-  const onItem = options.onItem
-  const step = options.step
-
-  const resumeSequential = (
-    state: S,
-    items: ReadonlyArray<A>,
-    index: number,
-    end: number,
-    effect: Effect.Effect<X, E, R>
-  ): Effect.Effect<void, E | E2, R> =>
-    flatMap(
-      exit(effect),
-      (itemExit) => step(state, items[index], itemExit, index) ?? runSequential(state, items, index + 1, end) ?? void_
-    )
-
-  const runSequential = (
-    state: S,
-    items: ReadonlyArray<A>,
-    index = 0,
-    end = items.length
-  ): Effect.Effect<void, E | E2, R> | undefined => {
-    for (; index < end; index++) {
-      const item = items[index]
-      const effect = onItem(state, item, index)
-      if (!effectIsExit(effect)) {
-        return resumeSequential(state, items, index, end, effect)
-      }
-      const terminal = step(state, item, effect, index)
-      if (terminal) return terminal._tag === "Failure" ? terminal : undefined
-    }
-  }
-
-  return runSequential
-}
-
 const iterateConcurrentImpl = <S, A, X, E, R, E2>(options: IterateOptions<S, A, X, E, R, E2>) => {
   const onItem = options.onItem
   const step = options.step

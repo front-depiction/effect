@@ -2,7 +2,6 @@ import * as Effect from "../../Effect.ts"
 import type { CompiledDecoder, Decode, Is, Make } from "../../schema/SchemaCompiler.ts"
 import type * as SchemaAST from "../../SchemaAST.ts"
 import type { Parser } from "../../SchemaParser.ts"
-import * as Interpreter from "./interpreter.ts"
 import * as Machine from "./machine.ts"
 import * as InternalParser from "./parser.ts"
 
@@ -41,15 +40,10 @@ function activateCompilerAdapters(): void {
   compilerAdaptersEnabled = true
 }
 
-const decodeChild = (ast: SchemaAST.AST): Parser =>
-  compilerAdaptersEnabled
-    ? lazyParser(resolve, ast, "parser")
-    : resolve(ast).parser
-const makeChild = (ast: SchemaAST.AST): Parser =>
-  compilerAdaptersEnabled
-    ? lazyParser(resolve, ast, "makeEffect")
-    : resolve(ast).makeEffect
-const makeField = (ast: SchemaAST.AST): Parser => Interpreter.compileField(ast, makeChild)
+function withDefault(ast: SchemaAST.AST, node: Machine.Node<unknown>): Machine.Node<unknown> {
+  const value = ast.context?.constructorDefault
+  return value === undefined ? node : Machine.defaultNode(ast, value, node)
+}
 
 const resolver: Machine.Resolver = {
   node: (ast) => resolve(ast).node,
@@ -59,12 +53,21 @@ const resolver: Machine.Resolver = {
 
 const makeResolver: Machine.Resolver = {
   node: (ast) => resolve(ast).makeNode,
-  field: (ast) => {
-    const node = resolve(ast).makeNode
-    const value = ast.context?.constructorDefault
-    return value === undefined ? node : Machine.defaultNode(ast, value, node)
-  },
+  field: (ast) => withDefault(ast, resolve(ast).makeNode),
   make: true
+}
+
+/** @internal */
+export function lazyResolver(
+  resolve: Resolve,
+  operation: "parser" | "decodeEffect" | "makeEffect",
+  make: boolean
+): Machine.Resolver {
+  const node = (ast: SchemaAST.AST) => {
+    const parser = lazyParser(resolve, ast, operation)
+    return Machine.foreign(ast, () => parser)
+  }
+  return { node, field: make ? (ast) => withDefault(ast, node(ast)) : node, make }
 }
 
 /** @internal */
@@ -91,72 +94,38 @@ class InterpretedEntry implements Entry {
   declare private cachedRootEffect: Parser | undefined
   declare private cachedGuardEffect: Parser | undefined
   declare private cachedNode: Machine.Node<unknown> | undefined
-  declare private cachedPlan: Machine.Node<unknown> | null | undefined
-  declare private cachedClosure: Parser | undefined
-  declare private cachedMakePlan: Machine.Node<unknown> | null | undefined
   declare private cachedMakeNode: Machine.Node<unknown> | undefined
-  declare private cachedMakeClosure: Parser | undefined
 
   constructor(ast: SchemaAST.AST) {
     this.ast = ast
   }
 
-  get plan(): Machine.Node<unknown> | null {
-    if (this.cachedPlan === undefined) this.cachedPlan = Machine.build(this.ast, resolver) ?? null
-    return this.cachedPlan
-  }
-
   get node(): Machine.Node<unknown> {
-    return this.cachedNode ??= this.plan ?? Machine.foreign(this.ast, () => this.closure)
-  }
-
-  get closure(): Parser {
-    return this.cachedClosure ??= Interpreter.compile(this.ast, decodeChild)
+    return this.cachedNode ??= Machine.build(this.ast, resolver)
   }
 
   get decodeEffect(): Parser {
-    return this.cachedDecodeEffect ??= (input, options) => {
-      const plan = this.plan
-      return plan !== null ? Machine.decode(plan, input, options, false) : this.closure(input, options)
-    }
+    return this.cachedDecodeEffect ??= (input, options) => Machine.decode(this.node, input, options, false)
   }
 
   get rootEffect(): Parser {
-    return this.cachedRootEffect ??= (input, options) => {
-      const plan = this.plan
-      return plan !== null ? Machine.decode(plan, input, options, true) : this.closure(input, options)
-    }
+    return this.cachedRootEffect ??= (input, options) => Machine.decode(this.node, input, options, true)
   }
 
   get guardEffect(): Parser {
-    return this.cachedGuardEffect ??= (input, options) => {
-      const plan = this.plan
-      return plan !== null ? Machine.guard(plan, input, options) : this.closure(input, options)
-    }
+    return this.cachedGuardEffect ??= (input, options) => Machine.guard(this.node, input, options)
   }
 
   get parser(): Parser {
     return this.decodeEffect
   }
 
-  get makePlan(): Machine.Node<unknown> | null {
-    if (this.cachedMakePlan === undefined) this.cachedMakePlan = Machine.build(this.ast, makeResolver) ?? null
-    return this.cachedMakePlan
-  }
-
   get makeNode(): Machine.Node<unknown> {
-    return this.cachedMakeNode ??= this.makePlan ?? Machine.foreign(this.ast, () => this.makeClosure)
-  }
-
-  get makeClosure(): Parser {
-    return this.cachedMakeClosure ??= Interpreter.compile(this.ast, makeChild, makeField)
+    return this.cachedMakeNode ??= Machine.build(this.ast, makeResolver)
   }
 
   get makeEffect(): Parser {
-    return this.cachedMakeEffect ??= (input, options) => {
-      const plan = this.makePlan
-      return plan !== null ? Machine.decode(plan, input, options, false) : this.makeClosure(input, options)
-    }
+    return this.cachedMakeEffect ??= (input, options) => Machine.decode(this.makeNode, input, options, false)
   }
 }
 
@@ -211,7 +180,8 @@ class CompilerEntry extends InterpretedEntry {
   override get decodeEffect(): Parser {
     return this.save(
       "decodeEffect",
-      this.operation("decodeEffect") ?? Interpreter.compile(this.ast, (ast) => lazyParser(this.resolve, ast, "parser"))
+      this.operation("decodeEffect") ??
+        Machine.parser(Machine.build(this.ast, lazyResolver(this.resolve, "parser", false)))
     )
   }
 
@@ -223,16 +193,10 @@ class CompilerEntry extends InterpretedEntry {
   }
 
   override get makeEffect(): Parser {
-    const makeEffect = this.operation("makeEffect")
-    if (makeEffect !== undefined) return this.save("makeEffect", makeEffect)
-    const child = (ast: SchemaAST.AST): Parser => lazyParser(this.resolve, ast, "makeEffect")
     return this.save(
       "makeEffect",
-      Interpreter.compile(
-        this.ast,
-        child,
-        (ast) => Interpreter.compileField(ast, child)
-      )
+      this.operation("makeEffect") ??
+        Machine.parser(Machine.build(this.ast, lazyResolver(this.resolve, "makeEffect", true)))
     )
   }
 }

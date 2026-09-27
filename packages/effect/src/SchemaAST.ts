@@ -12,15 +12,10 @@
  */
 
 import * as Arr from "./Array.ts"
-import * as Cause from "./Cause.ts"
 import * as Effect from "./Effect.ts"
-import * as Exit from "./Exit.ts"
 import { format, formatPropertyKey } from "./Formatter.ts"
 import { identity, memoize, memoizeIdempotent } from "./Function.ts"
-import { effectIsExit, iterateConcurrent, iterateEager, resolveConcurrency } from "./internal/effect.ts"
-import * as InternalRecord from "./internal/record.ts"
 import * as InternalAnnotations from "./internal/schema/annotations.ts"
-import * as InternalSchemaCause from "./internal/schema/cause.ts"
 import { collectIssues } from "./internal/schema/checks.ts"
 import * as Machine from "./internal/schema/machine.ts"
 import * as InternalParser from "./internal/schema/parser.ts"
@@ -30,7 +25,6 @@ import * as Result from "./Result.ts"
 import type * as Schema from "./Schema.ts"
 import * as SchemaGetter from "./SchemaGetter.ts"
 import * as SchemaIssue from "./SchemaIssue.ts"
-import type * as SchemaParser from "./SchemaParser.ts"
 import * as SchemaTransformation from "./SchemaTransformation.ts"
 import type * as Types from "./Types.ts"
 
@@ -668,7 +662,7 @@ interface ASTNode {
   readonly encoding: Encoding | undefined
   readonly context: Context | undefined
   /** @internal */
-  getNode(resolver: Machine.Resolver): Machine.Node<unknown>
+  getParser(resolver: Machine.Resolver): Machine.Node<unknown>
   toString(): string
 }
 
@@ -676,7 +670,7 @@ abstract class ASTNodeImpl implements ASTNode {
   readonly [TypeId] = TypeId
   abstract readonly _tag: string
   /** @internal */
-  abstract getNode(resolver: Machine.Resolver): Machine.Node<unknown>
+  abstract getParser(resolver: Machine.Resolver): Machine.Node<unknown>
   readonly annotations: Schema.Annotations.Annotations | undefined
   readonly checks: Checks | undefined
   readonly encoding: Encoding | undefined
@@ -734,9 +728,6 @@ export interface Declaration extends ASTNode {
   readonly encodingRun: DeclarationRun | undefined
   /** @internal */
 
-  getParser(): SchemaParser.Parser
-  /** @internal */
-
   recur(recur: (ast: AST) => AST): Declaration
   /** @internal */
 
@@ -789,16 +780,8 @@ export const Declaration: new(
     this.encodingRun = encodingRun
   }
   /** @internal */
-  override getNode(resolver: Machine.Resolver): Machine.Node<unknown> {
+  override getParser(resolver: Machine.Resolver): Machine.Node<unknown> {
     return Machine.declarationNode(this, resolver, getConstructorDescriptor)
-  }
-  /** @internal */
-  getParser(): SchemaParser.Parser {
-    let run: ReturnType<typeof this.run>
-    return (input, options) => {
-      if (input === InternalParser.missing) return InternalParser.missingExit
-      return (run ??= this.run(this.typeParameters))(input, this, options)
-    }
   }
   private _rebuild(
     recur: (ast: AST) => AST,
@@ -845,9 +828,6 @@ export interface Null extends ASTNode {
   readonly _tag: "Null"
   /** @internal */
 
-  getParser(): SchemaParser.Parser
-  /** @internal */
-
   getExpected(): string
 }
 
@@ -865,12 +845,8 @@ export const Null: new(
 ) => Null = class extends ASTNodeImpl {
   readonly _tag = "Null"
   /** @internal */
-  override getNode(): Machine.Node<unknown> {
+  override getParser(): Machine.Node<unknown> {
     return Machine.constNode(this, null)
-  }
-  /** @internal */
-  getParser() {
-    return fromConst(this, null)
   }
   /** @internal */
   getExpected(): string {
@@ -910,9 +886,6 @@ export interface Undefined extends ASTNode {
   readonly _tag: "Undefined"
   /** @internal */
 
-  getParser(): SchemaParser.Parser
-  /** @internal */
-
   toCodecJson(): AST
   /** @internal */
 
@@ -933,12 +906,8 @@ export const Undefined: new(
 ) => Undefined = class extends ASTNodeImpl {
   readonly _tag = "Undefined"
   /** @internal */
-  override getNode(): Machine.Node<unknown> {
+  override getParser(): Machine.Node<unknown> {
     return Machine.constNode(this, undefined)
-  }
-  /** @internal */
-  getParser() {
-    return fromConst(this, undefined)
   }
   /** @internal */
   toCodecJson(): AST {
@@ -998,11 +967,6 @@ export interface Void extends ASTNode {
   readonly _tag: "Void"
   /** @internal */
 
-  getParser(): (
-    input: unknown
-  ) => InternalParser.Success<undefined, never> | InternalParser.Success<typeof InternalParser.missing, never>
-  /** @internal */
-
   toCodecJson(): AST
   /** @internal */
 
@@ -1023,13 +987,8 @@ export const Void: new(
 ) => Void = class extends ASTNodeImpl {
   readonly _tag = "Void"
   /** @internal */
-  override getNode(): Machine.Node<unknown> {
+  override getParser(): Machine.Node<unknown> {
     return Machine.voidNode(this)
-  }
-  /** @internal */
-  getParser() {
-    const succeed = InternalParser.succeed(undefined)
-    return (input: unknown) => input === InternalParser.missing ? InternalParser.missingExit : succeed
   }
   /** @internal */
   toCodecJson(): AST {
@@ -1083,9 +1042,6 @@ export interface Never extends ASTNode {
   readonly _tag: "Never"
   /** @internal */
 
-  getParser(): SchemaParser.Parser
-  /** @internal */
-
   getExpected(): string
 }
 
@@ -1103,12 +1059,8 @@ export const Never: new(
 ) => Never = class extends ASTNodeImpl {
   readonly _tag = "Never"
   /** @internal */
-  override getNode(): Machine.Node<unknown> {
+  override getParser(): Machine.Node<unknown> {
     return Machine.neverNode(this)
-  }
-  /** @internal */
-  getParser() {
-    return fromRefinement(this, Predicate.isNever)
   }
   /** @internal */
   getExpected(): string {
@@ -1145,9 +1097,6 @@ export interface Any extends ASTNode {
   readonly _tag: "Any"
   /** @internal */
 
-  getParser(): SchemaParser.Parser
-  /** @internal */
-
   getExpected(): string
 }
 
@@ -1165,12 +1114,8 @@ export const Any: new(
 ) => Any = class extends ASTNodeImpl {
   readonly _tag = "Any"
   /** @internal */
-  override getNode(): Machine.Node<unknown> {
+  override getParser(): Machine.Node<unknown> {
     return Machine.anyNode(this)
-  }
-  /** @internal */
-  getParser() {
-    return fromRefinement(this, Predicate.isUnknown)
   }
   /** @internal */
   getExpected(): string {
@@ -1210,9 +1155,6 @@ export interface Unknown extends ASTNode {
   readonly _tag: "Unknown"
   /** @internal */
 
-  getParser(): SchemaParser.Parser
-  /** @internal */
-
   getExpected(): string
 }
 
@@ -1230,12 +1172,8 @@ export const Unknown: new(
 ) => Unknown = class extends ASTNodeImpl {
   readonly _tag = "Unknown"
   /** @internal */
-  override getNode(): Machine.Node<unknown> {
+  override getParser(): Machine.Node<unknown> {
     return Machine.anyNode(this)
-  }
-  /** @internal */
-  getParser() {
-    return fromRefinement(this, Predicate.isUnknown)
   }
   /** @internal */
   getExpected(): string {
@@ -1272,9 +1210,6 @@ export interface ObjectKeyword extends ASTNode {
   readonly _tag: "ObjectKeyword"
   /** @internal */
 
-  getParser(): SchemaParser.Parser
-  /** @internal */
-
   getExpected(): string
 }
 
@@ -1292,12 +1227,8 @@ export const ObjectKeyword: new(
 ) => ObjectKeyword = class extends ASTNodeImpl {
   readonly _tag = "ObjectKeyword"
   /** @internal */
-  override getNode(): Machine.Node<unknown> {
+  override getParser(): Machine.Node<unknown> {
     return Machine.objectKeywordNode(this)
-  }
-  /** @internal */
-  getParser() {
-    return fromRefinement(this, Predicate.isObjectKeyword)
   }
   /** @internal */
   getExpected(): string {
@@ -1343,9 +1274,6 @@ export interface Enum extends ASTNode {
   >
   /** @internal */
 
-  getParser(): SchemaParser.Parser
-  /** @internal */
-
   toCodecStringTree(): AST
   /** @internal */
 
@@ -1389,16 +1317,8 @@ export const Enum: new(
     this.enums = enums
   }
   /** @internal */
-  override getNode(): Machine.Node<unknown> {
+  override getParser(): Machine.Node<unknown> {
     return Machine.enumNode(this)
-  }
-  /** @internal */
-  getParser() {
-    const values = new Set<unknown>(this.enums.map(([, v]) => v))
-    return fromRefinement(
-      this,
-      (input): input is typeof this.enums[number][1] => values.has(input)
-    )
   }
   /** @internal */
   toCodecStringTree(): AST {
@@ -1496,9 +1416,6 @@ export interface TemplateLiteral extends ASTNode {
   readonly suffixLengths: ReadonlyArray<number>
   /** @internal */
 
-  getParser(compile: SchemaParser.Compiler): SchemaParser.Parser
-  /** @internal */
-
   getExpected(): string
   /** @internal */
 
@@ -1562,23 +1479,8 @@ export const TemplateLiteral: new(
     this.suffixLengths = suffixLengths
   }
   /** @internal */
-  override getNode(resolver: Machine.Resolver): Machine.Node<unknown> {
+  override getParser(resolver: Machine.Resolver): Machine.Node<unknown> {
     return Machine.templateNode(this, resolver.node(templateLiteralCodec(this)))
-  }
-  /** @internal */
-  getParser(compile: SchemaParser.Compiler): SchemaParser.Parser {
-    const parser = compile(templateLiteralCodec(this))
-    return (input, options) => {
-      if (input === InternalParser.missing) return InternalParser.missingExit
-      const result = parser(input, options)
-      if ((result as Exit.Exit<unknown, unknown>)._tag === "Success") {
-        return InternalParser.sameExit
-      }
-      return Effect.mapBothEager(result, {
-        onSuccess: () => input,
-        onFailure: (issue) => new SchemaIssue.Composite(this, [issue], input, options)
-      })
-    }
   }
   /** @internal */
   getExpected(): string {
@@ -1652,9 +1554,6 @@ export interface UniqueSymbol extends ASTNode {
   readonly symbol: symbol
   /** @internal */
 
-  getParser(): SchemaParser.Parser
-  /** @internal */
-
   toCodecStringTree(): AST
   /** @internal */
 
@@ -1688,12 +1587,8 @@ export const UniqueSymbol: new(
     this.symbol = symbol
   }
   /** @internal */
-  override getNode(): Machine.Node<unknown> {
+  override getParser(): Machine.Node<unknown> {
     return Machine.constNode(this, this.symbol)
-  }
-  /** @internal */
-  getParser() {
-    return fromConst(this, this.symbol)
   }
   /** @internal */
   toCodecStringTree(): AST {
@@ -1752,9 +1647,6 @@ export interface Literal extends ASTNode {
   readonly literal: LiteralValue
   /** @internal */
 
-  getParser(): SchemaParser.Parser
-  /** @internal */
-
   matchPart(s: string, _options: ParseOptions): LiteralValue | undefined
   /** @internal */
 
@@ -1797,12 +1689,8 @@ export const Literal: new(
     this.literal = literal
   }
   /** @internal */
-  override getNode(): Machine.Node<unknown> {
+  override getParser(): Machine.Node<unknown> {
     return Machine.constNode(this, this.literal)
-  }
-  /** @internal */
-  getParser() {
-    return fromConst(this, this.literal)
   }
   /** @internal */
   matchPart(s: string, _options: ParseOptions): LiteralValue | undefined {
@@ -1848,9 +1736,6 @@ export interface String extends ASTNode {
   readonly _tag: "String"
   /** @internal */
 
-  getParser(): SchemaParser.Parser
-  /** @internal */
-
   matchPart(s: string, options: ParseOptions): string | undefined
   /** @internal */
 
@@ -1871,12 +1756,8 @@ export const String: new(
 ) => String = class extends ASTNodeImpl {
   readonly _tag = "String"
   /** @internal */
-  override getNode(): Machine.Node<unknown> {
+  override getParser(): Machine.Node<unknown> {
     return Machine.stringNode(this)
-  }
-  /** @internal */
-  getParser() {
-    return fromRefinement(this, Predicate.isString)
   }
   /** @internal */
   matchPart(s: string, options: ParseOptions): string | undefined {
@@ -1927,9 +1808,6 @@ export interface Number extends ASTNode {
   readonly _tag: "Number"
   /** @internal */
 
-  getParser(): SchemaParser.Parser
-  /** @internal */
-
   matchKey(s: string, options: ParseOptions): number | undefined
   /** @internal */
 
@@ -1959,12 +1837,8 @@ export const Number: new(
 ) => Number = class extends ASTNodeImpl {
   readonly _tag = "Number"
   /** @internal */
-  override getNode(): Machine.Node<unknown> {
+  override getParser(): Machine.Node<unknown> {
     return Machine.numberNode(this)
-  }
-  /** @internal */
-  getParser() {
-    return fromRefinement(this, Predicate.isNumber)
   }
   /** @internal */
   matchKey(s: string, options: ParseOptions): number | undefined {
@@ -2039,9 +1913,6 @@ export interface Boolean extends ASTNode {
   readonly _tag: "Boolean"
   /** @internal */
 
-  getParser(): SchemaParser.Parser
-  /** @internal */
-
   getExpected(): string
 }
 
@@ -2059,12 +1930,8 @@ export const Boolean: new(
 ) => Boolean = class extends ASTNodeImpl {
   readonly _tag = "Boolean"
   /** @internal */
-  override getNode(): Machine.Node<unknown> {
+  override getParser(): Machine.Node<unknown> {
     return Machine.booleanNode(this)
-  }
-  /** @internal */
-  getParser() {
-    return fromRefinement(this, Predicate.isBoolean)
   }
   /** @internal */
   getExpected(): string {
@@ -2110,9 +1977,6 @@ export interface Symbol extends ASTNode {
   readonly _tag: "Symbol"
   /** @internal */
 
-  getParser(): SchemaParser.Parser
-  /** @internal */
-
   matchKey(s: symbol, options: ParseOptions): symbol | undefined
   /** @internal */
 
@@ -2136,12 +2000,8 @@ export const Symbol: new(
 ) => Symbol = class extends ASTNodeImpl {
   readonly _tag = "Symbol"
   /** @internal */
-  override getNode(): Machine.Node<unknown> {
+  override getParser(): Machine.Node<unknown> {
     return Machine.symbolNode(this)
-  }
-  /** @internal */
-  getParser() {
-    return fromRefinement(this, Predicate.isSymbol)
   }
   /** @internal */
   matchKey(s: symbol, options: ParseOptions): symbol | undefined {
@@ -2195,9 +2055,6 @@ export interface BigInt extends ASTNode {
   readonly _tag: "BigInt"
   /** @internal */
 
-  getParser(): SchemaParser.Parser
-  /** @internal */
-
   matchPart(s: string, options: ParseOptions): bigint | undefined
   /** @internal */
 
@@ -2221,12 +2078,8 @@ export const BigInt: new(
 ) => BigInt = class extends ASTNodeImpl {
   readonly _tag = "BigInt"
   /** @internal */
-  override getNode(): Machine.Node<unknown> {
+  override getParser(): Machine.Node<unknown> {
     return Machine.bigintNode(this)
-  }
-  /** @internal */
-  getParser() {
-    return fromRefinement(this, Predicate.isBigInt)
   }
   /** @internal */
   matchPart(s: string, options: ParseOptions): bigint | undefined {
@@ -2311,12 +2164,6 @@ export interface Arrays extends ASTNode {
   readonly encodingChecks: Checks | undefined
   /** @internal */
 
-  getParser(
-    compile: SchemaParser.Compiler,
-    compileField?: SchemaParser.Compiler
-  ): SchemaParser.Parser
-  /** @internal */
-
   recur(recur: (ast: AST) => AST): Arrays
   /** @internal */
 
@@ -2384,100 +2231,8 @@ export const Arrays: new(
     }
   }
   /** @internal */
-  override getNode(resolver: Machine.Resolver): Machine.Node<unknown> {
+  override getParser(resolver: Machine.Resolver): Machine.Node<unknown> {
     return Machine.arraysNode(this, resolver)
-  }
-  /** @internal */
-  getParser(
-    compile: SchemaParser.Compiler,
-    compileField: SchemaParser.Compiler = compile
-  ): SchemaParser.Parser {
-    // oxlint-disable-next-line @typescript-eslint/no-this-alias
-    const ast = this
-    type ElementParser = { readonly ast: AST; readonly parser: SchemaParser.Parser }
-    let elements: Array<ElementParser> | undefined
-    let rest: Array<ElementParser> | undefined
-    const elementLen = ast.elements.length
-    const tailLen = Math.max(0, ast.rest.length - 1)
-
-    function getParser(
-      tailThreshold: number,
-      index: number
-    ): { readonly ast: AST; readonly parser: SchemaParser.Parser } {
-      if (index < elementLen) {
-        return elements![index]
-      } else if (index >= tailThreshold) {
-        return rest![index - tailThreshold + 1]
-      }
-      return rest![0]
-    }
-
-    const finish = (state: ArrayParserState): Effect.Effect<unknown, SchemaIssue.Issue, any> => {
-      const { input, len, options } = state
-      if (ast.rest.length === 0 && len > elementLen) {
-        for (let i = elementLen; i < len; i++) {
-          const unexpected = new SchemaIssue.UnexpectedKey(ast, input[i], options)
-          const issue = new SchemaIssue.Pointer([i], unexpected)
-          if (options.errors === "all") {
-            if (state.issues) state.issues.push(issue)
-            else state.issues = [issue]
-          } else {
-            return Effect.fail(new SchemaIssue.Composite(ast, [issue], input, options))
-          }
-        }
-      }
-      if (state.issues) {
-        return Effect.fail(new SchemaIssue.Composite(ast, state.issues, input, options))
-      }
-      return InternalParser.succeed(state.output)
-    }
-
-    const parse = (
-      input: ReadonlyArray<unknown>,
-      options: ParseOptions
-    ): Effect.Effect<unknown, SchemaIssue.Issue, any> => {
-      const len = input.length
-      const state: ArrayParserState = {
-        ast,
-        getParser,
-        input,
-        len,
-        tailThreshold: Math.max(elementLen, len - tailLen),
-        output: new globalThis.Array(len),
-        issues: undefined,
-        options
-      }
-      const end = ast.rest.length === 0 ? elementLen : Math.max(len, elementLen + tailLen)
-      const concurrency = options.concurrency === undefined ? 1 : resolveConcurrency(options.concurrency)
-      const eff = concurrency === 1
-        ? parseArray(state, input, 0, end)
-        : parseArrayConcurrent(state, input, { concurrency, end })
-      if (!eff) return finish(state)
-      if (effectIsExit(eff)) return Effect.flatMapEager(eff, () => finish(state))
-      // Reparse on later runs to avoid reusing mutable traversal state.
-      let first = true
-      return Effect.suspend(() => {
-        if (!first) return parse(input, options)
-        first = false
-        return Effect.flatMap(eff, () => finish(state))
-      })
-    }
-
-    return (input, options) => {
-      if (input === InternalParser.missing) return InternalParser.missingExit
-      try {
-        if (!Array.isArray(input)) {
-          return Effect.fail(new SchemaIssue.InvalidType(ast, input, options))
-        }
-        if (!elements) {
-          elements = ast.elements.map((ast) => ({ ast, parser: compileField(ast) }))
-          rest = ast.rest.map((ast) => ({ ast, parser: compileField(ast) }))
-        }
-        return parse(input, options)
-      } catch (error) {
-        return Effect.die(error)
-      }
-    }
   }
   private _rebuild(recur: (ast: AST) => AST, checks: Checks | undefined, encodingChecks: Checks | undefined) {
     const elements = mapOrSame(this.elements, recur)
@@ -2507,101 +2262,6 @@ export const Arrays: new(
   /** @internal */
   getExpected(): string {
     return "array"
-  }
-}
-
-type ArrayParserState = {
-  readonly ast: AST
-  readonly input: ReadonlyArray<unknown>
-  readonly len: number
-  readonly getParser: (
-    tailThreshold: number,
-    index: number
-  ) => { readonly ast: AST; readonly parser: SchemaParser.Parser }
-  readonly tailThreshold: number
-  readonly options: ParseOptions
-  readonly output: Array<unknown>
-  issues: Arr.NonEmptyArray<SchemaIssue.Issue> | undefined
-}
-
-/** @internal */
-export function stepArray(
-  s: ArrayParserState,
-  item: unknown,
-  exit: Exit.Exit<unknown, SchemaIssue.Issue>,
-  i: number
-) {
-  if (exit._tag === "Failure") {
-    return wrapPropertyKeyIssue(s, s.ast, i, exit)
-  }
-  const value = exit === InternalParser.sameExit
-    ? item
-    : (exit as InternalParser.Success<unknown, SchemaIssue.Issue>)[InternalParser.args]
-  if (value !== InternalParser.missing) {
-    s.output[i] = value
-  } else {
-    const p = s.getParser(s.tailThreshold, i)
-    if (isOptional(p.ast)) return
-    const issue = new SchemaIssue.Pointer([i], new SchemaIssue.MissingKey(p.ast.context?.annotations))
-    if (s.options.errors === "all") {
-      if (s.issues) s.issues.push(issue)
-      else s.issues = [issue]
-    } else {
-      return Exit.fail(
-        new SchemaIssue.Composite(s.ast, [issue], s.input, s.options)
-      )
-    }
-  }
-}
-
-const parseArrayOptions = {
-  onItem(s: ArrayParserState, item: unknown, i: number) {
-    const value = i < s.len ? item : InternalParser.missing
-    return s.getParser(s.tailThreshold, i).parser(value, s.options)
-  },
-  step: stepArray
-}
-
-/** @internal */
-export const parseArray = iterateEager<ArrayParserState, unknown>()(parseArrayOptions)
-const parseArrayConcurrent = iterateConcurrent<ArrayParserState, unknown>()(parseArrayOptions)
-
-const wrapPropertyKeyIssue = (
-  s: {
-    readonly input: unknown
-    readonly options: ParseOptions
-    issues: Array<SchemaIssue.Issue> | undefined
-  },
-  ast: AST,
-  key: PropertyKey,
-  exit: Exit.Failure<any, SchemaIssue.Issue>
-) => {
-  if (exit.cause.reasons.length === 0) {
-    return exit
-  }
-  const issue = InternalSchemaCause.getSchemaIssue(exit.cause)
-  if (issue === undefined) {
-    return Exit.failCause(
-      Cause.map(
-        exit.cause,
-        (issue) =>
-          new SchemaIssue.Composite(
-            ast,
-            [new SchemaIssue.Pointer([key], issue)],
-            s.input,
-            s.options
-          )
-      )
-    )
-  }
-  const pointer = new SchemaIssue.Pointer([key], issue)
-  if (s.options.errors === "all") {
-    if (s.issues) s.issues.push(pointer)
-    else s.issues = [pointer]
-  } else {
-    return Exit.fail(
-      new SchemaIssue.Composite(ast, [pointer], s.input, s.options)
-    )
   }
 }
 
@@ -2823,12 +2483,6 @@ export interface Objects extends ASTNode {
   readonly encodingChecks: Checks | undefined
   /** @internal */
 
-  getParser(
-    compile: SchemaParser.Compiler,
-    compileField?: SchemaParser.Compiler
-  ): SchemaParser.Parser
-  /** @internal */
-
   flip(recur: (ast: AST) => AST): AST
   /** @internal */
 
@@ -2873,296 +2527,10 @@ export const Objects: new(
     this.encodingChecks = encodingChecks
   }
   /** @internal */
-  override getNode(resolver: Machine.Resolver): Machine.Node<unknown> {
+  override getParser(resolver: Machine.Resolver): Machine.Node<unknown> {
     return this.indexSignatures.length > 0
       ? Machine.recordNode(this, resolver, recordSupport)
       : Machine.objectsNode(this, resolver)
-  }
-  /** @internal */
-  getParser(
-    compile: SchemaParser.Compiler,
-    compileField: SchemaParser.Compiler = compile
-  ): SchemaParser.Parser {
-    // oxlint-disable-next-line @typescript-eslint/no-this-alias
-    const ast = this
-    const hasProperties = ast.propertySignatures.length
-    const indexCount = ast.indexSignatures.length
-    // ---------------------------------------------
-    // handle empty struct
-    // ---------------------------------------------
-    if (!hasProperties && !indexCount) {
-      return fromRefinement(ast, Predicate.isNotNullish)
-    }
-
-    let properties: Array<ParsedProperty> | undefined
-    let indexes:
-      | Array<{
-        readonly is: IndexSignature
-        readonly parserKey: SchemaParser.Parser
-        readonly parserValue: SchemaParser.Parser
-      }>
-      | undefined
-    type Index = NonNullable<typeof indexes>[number]
-    const compileMembers = (): Array<ParsedProperty> => {
-      if (!properties) {
-        properties = ast.propertySignatures.map((ps) => ({
-          parser: compileField(ps.type),
-          name: ps.name,
-          type: ps.type
-        }))
-        indexes = indexCount
-          ? ast.indexSignatures.map((is) => ({
-            is,
-            parserKey: compile(parameterFromPropertyKey(is.parameter)),
-            parserValue: compileField(is.type)
-          }))
-          : undefined
-      }
-      return properties
-    }
-
-    const makeFallback = (): SchemaParser.Parser => {
-      const expectedKeys = new Set<PropertyKey>(
-        ast.propertySignatures.map((ps) => typeof ps.name === "number" ? globalThis.String(ps.name) : ps.name)
-      )
-      const finishIndex = (
-        s: ObjectParserState,
-        key: PropertyKey,
-        k2: PropertyKey | typeof InternalParser.missing,
-        inputValue: unknown,
-        exitValue: Exit.Exit<unknown, SchemaIssue.Issue>
-      ): Effect.Effect<void, SchemaIssue.Issue, any> => {
-        if (exitValue._tag === "Failure") {
-          return wrapPropertyKeyIssue(s, ast, key, exitValue) ?? Exit.void
-        }
-        const value = exitValue === InternalParser.sameExit
-          ? inputValue
-          : (exitValue as InternalParser.Success<unknown, SchemaIssue.Issue>)[InternalParser.args]
-        if (k2 !== InternalParser.missing && value !== InternalParser.missing) {
-          if (
-            hasProperties &&
-            (expectedKeys.has(key) || expectedKeys.has(typeof k2 === "number" ? globalThis.String(k2) : k2))
-          ) return Exit.void
-          InternalRecord.assignProperty(s.out, k2, value)
-        }
-        return Exit.void
-      }
-      const parseIndex = (
-        s: ObjectParserState,
-        key: PropertyKey,
-        index: Index,
-        exitKey?: Exit.Exit<unknown, SchemaIssue.Issue>
-      ): Effect.Effect<void, SchemaIssue.Issue, any> => {
-        if (!exitKey) {
-          const eff = index.parserKey(key, s.options)
-          if (!effectIsExit(eff)) {
-            return Effect.flatMap(Effect.exit(eff), (exit) => parseIndex(s, key, index, exit))
-          }
-          exitKey = eff
-        }
-        if (exitKey._tag === "Failure") {
-          return wrapPropertyKeyIssue(s, ast, key, exitKey) ?? Exit.void
-        }
-        const k2 = exitKey === InternalParser.sameExit
-          ? key
-          : (exitKey as InternalParser.Success<PropertyKey, SchemaIssue.Issue>)[InternalParser.args]
-        const inputValue = s.input[key]
-        const result = index.parserValue(inputValue, s.options)
-        return effectIsExit(result)
-          ? finishIndex(s, key, k2, inputValue, result)
-          : Effect.flatMap(Effect.exit(result), (exit) => finishIndex(s, key, k2, inputValue, exit))
-      }
-      const parseStringIndex = (
-        s: ObjectParserState,
-        key: PropertyKey,
-        index: Index
-      ): Effect.Effect<void, SchemaIssue.Issue, any> => {
-        const inputValue = s.input[key]
-        const result = index.parserValue(inputValue, s.options)
-        return effectIsExit(result)
-          ? finishIndex(s, key, key, inputValue, result)
-          : Effect.flatMap(Effect.exit(result), (exit) => finishIndex(s, key, key, inputValue, exit))
-      }
-      const parseIndexes = indexCount
-        ? iterateConcurrent<ObjectParserState, readonly [key: PropertyKey, index: Index]>()({
-          onItem: (s, [key, index]) =>
-            index.is.parameter === string ? parseStringIndex(s, key, index) : parseIndex(s, key, index),
-          step: (_s, _item, exit) => exit._tag === "Failure" ? exit : undefined
-        })
-        : undefined
-      return Effect.fnUntracedEager(function*(input, options) {
-        if (input === InternalParser.missing) {
-          return InternalParser.missing
-        }
-
-        // If the input is not a record, return early with an error
-        if (!(typeof input === "object" && input !== null && !Array.isArray(input))) {
-          return yield* Effect.fail(new SchemaIssue.InvalidType(ast, input, options))
-        }
-        compileMembers()
-
-        const record = input as Record<PropertyKey, unknown>
-        const out: Record<PropertyKey, unknown> = {}
-        const state = {
-          ast,
-          input: record,
-          out,
-          issues: undefined as Arr.NonEmptyArray<SchemaIssue.Issue> | undefined,
-          options
-        }
-        const errorsAllOption = options.errors === "all"
-        const onExcessPropertyError = options.onExcessProperty === "error"
-        const concurrency = options.concurrency === undefined ? 1 : resolveConcurrency(options.concurrency)
-
-        // ---------------------------------------------
-        // handle excess properties
-        // ---------------------------------------------
-        const indexKeys = indexCount && onExcessPropertyError
-          ? ast.indexSignatures.map((index) => getIndexSignatureKeys(record, index.parameter, options))
-          : undefined
-        if (onExcessPropertyError) {
-          const coveredKeys = indexKeys ? new Set(expectedKeys) : expectedKeys
-          if (indexKeys) {
-            for (const keys of indexKeys) {
-              for (const key of keys) coveredKeys.add(key)
-            }
-          }
-          // Only enumerable own properties can be excess. Declared fields are
-          // parsed separately, regardless of their enumerability.
-          const inputKeys = Reflect.ownKeys(record)
-          for (let i = 0; i < inputKeys.length; i++) {
-            const key = inputKeys[i]
-            if (!coveredKeys.has(key) && Object.prototype.propertyIsEnumerable.call(record, key)) {
-              // key is unexpected
-              const unexpected = new SchemaIssue.UnexpectedKey(ast, record[key], options)
-              const issue = new SchemaIssue.Pointer([key], unexpected)
-              if (errorsAllOption) {
-                if (state.issues) {
-                  state.issues.push(issue)
-                } else {
-                  state.issues = [issue]
-                }
-                continue
-              } else {
-                return yield* Effect.fail(
-                  new SchemaIssue.Composite(ast, [issue], input, options)
-                )
-              }
-            }
-          }
-        }
-
-        // ---------------------------------------------
-        // handle property signatures
-        // ---------------------------------------------
-        if (hasProperties) {
-          const eff = concurrency === 1
-            ? parseProperties(state, properties!)
-            : parsePropertiesConcurrent(state, properties!, { concurrency })
-          if (eff) yield* eff
-        }
-
-        // ---------------------------------------------
-        // handle index signatures
-        // ---------------------------------------------
-        if (indexCount && concurrency === 1) {
-          for (let i = 0; i < indexCount; i++) {
-            const index = indexes![i]
-            const parse = index.is.parameter === string ? parseStringIndex : parseIndex
-            const keys = indexKeys?.[i] ?? (index.is.parameter === string
-              ? Object.keys(record)
-              : getIndexSignatureKeys(record, index.is.parameter, options))
-            for (let j = 0; j < keys.length; j++) {
-              const eff = parse(state, keys[j], index)
-              if (!effectIsExit(eff)) yield* eff
-              else if (eff._tag === "Failure") return yield* eff as Exit.Exit<never, SchemaIssue.Issue>
-            }
-          }
-        } else if (parseIndexes) {
-          const keyPairs = Arr.empty<readonly [PropertyKey, Index]>()
-          for (let i = 0; i < indexCount; i++) {
-            const index = indexes![i]
-            const keys = indexKeys?.[i] ?? (index.is.parameter === string
-              ? Object.keys(record)
-              : getIndexSignatureKeys(record, index.is.parameter, options))
-            for (let j = 0; j < keys.length; j++) {
-              keyPairs.push([keys[j], index])
-            }
-          }
-          const eff = parseIndexes(state, keyPairs, { concurrency })
-          if (eff) yield* eff
-        }
-
-        if (state.issues) {
-          return yield* Effect.fail(
-            new SchemaIssue.Composite(ast, state.issues, input, options)
-          )
-        }
-        return out
-      })
-    }
-
-    if (indexCount) return makeFallback()
-
-    let fallback: SchemaParser.Parser | undefined
-
-    // Resumes at the property whose parser suspended, without replaying the
-    // properties already parsed.
-    const resume = (
-      state: ObjectParserState,
-      index: number,
-      pending: Effect.Effect<unknown, SchemaIssue.Issue, any>
-    ): Effect.Effect<unknown, SchemaIssue.Issue, any> => {
-      const property = properties![index]
-      return Effect.flatMap(Effect.exit(pending), (exit) => {
-        const terminal = stepProperty(state, property, exit)
-        if (terminal) return terminal
-        const done = () => InternalParser.succeed(state.out)
-        const eff = parseProperties(state, properties!.slice(index + 1))
-        return eff ? Effect.flatMapEager(eff, done) : done()
-      })
-    }
-
-    // Fast path: a struct without index signatures, under the default parse
-    // options, needs none of the generator the fallback runs per value.
-    return (input, options) => {
-      if (input === InternalParser.missing) return InternalParser.missingExit
-      if (
-        options.errors === "all" ||
-        options.onExcessProperty !== undefined ||
-        (options.concurrency !== undefined && resolveConcurrency(options.concurrency) !== 1)
-      ) {
-        return (fallback ??= makeFallback())(input, options)
-      }
-      if (!(typeof input === "object" && input !== null && !Array.isArray(input))) {
-        return Effect.fail(new SchemaIssue.InvalidType(ast, input, options))
-      }
-      const props = compileMembers()
-      const record = input as Record<PropertyKey, unknown>
-      const out: Record<PropertyKey, unknown> = {}
-      const state: ObjectParserState = { ast, input: record, out, issues: undefined, options }
-      try {
-        for (let index = 0; index < props.length; index++) {
-          const property = props[index]
-          const name = property.name
-          const hasKey = hasPropertySignature(record, name)
-          const value = hasKey ? record[name] : InternalParser.missing
-          const exit = property.parser(value, options)
-          if (!effectIsExit(exit)) {
-            return resume(state, index, exit)
-          }
-          if (exit === InternalParser.sameExit) {
-            if (hasKey) InternalRecord.assignProperty(out, name, value)
-            continue
-          }
-          const terminal = stepProperty(state, property, exit)
-          if (terminal) return terminal
-        }
-      } catch (error) {
-        return Effect.die(error)
-      }
-      return InternalParser.succeed(out)
-    }
   }
   private _rebuild(
     recur: (ast: AST) => AST,
@@ -3210,66 +2578,6 @@ export const Objects: new(
     return "object"
   }
 }
-
-type ObjectParserState = {
-  readonly ast: Objects
-  readonly input: Record<PropertyKey, unknown>
-  readonly options: ParseOptions
-  readonly out: Record<PropertyKey, unknown>
-  issues: Arr.NonEmptyArray<SchemaIssue.Issue> | undefined
-}
-
-type ParsedProperty = {
-  readonly parser: SchemaParser.Parser
-  readonly name: PropertyKey
-  readonly type: AST
-}
-
-/** @internal */
-export function stepProperty(
-  s: ObjectParserState,
-  p: ParsedProperty,
-  exit: Exit.Exit<unknown, SchemaIssue.Issue>
-): Exit.Exit<void, SchemaIssue.Issue> | void {
-  if (exit._tag === "Failure") {
-    return wrapPropertyKeyIssue(s, s.ast, p.name, exit)
-  }
-  if (exit === InternalParser.sameExit) return
-  const value = (exit as InternalParser.Success<unknown, SchemaIssue.Issue>)[InternalParser.args]
-  if (value !== InternalParser.missing) {
-    InternalRecord.assignProperty(s.out, p.name, value)
-    return
-  }
-  delete s.out[p.name]
-  if (!isOptional(p.type)) {
-    const issue = new SchemaIssue.Pointer([p.name], new SchemaIssue.MissingKey(p.type.context?.annotations))
-    if (s.options.errors === "all") {
-      if (s.issues) s.issues.push(issue)
-      else s.issues = [issue]
-      return
-    } else {
-      return Exit.fail(
-        new SchemaIssue.Composite(s.ast, [issue], s.input, s.options)
-      )
-    }
-  }
-}
-
-const parsePropertiesOptions = {
-  onItem(s: ObjectParserState, p: ParsedProperty) {
-    if (!hasPropertySignature(s.input, p.name)) {
-      return p.parser(InternalParser.missing, s.options)
-    }
-    const value = s.input[p.name]
-    InternalRecord.assignProperty(s.out, p.name, value)
-    return p.parser(value, s.options)
-  },
-  step: stepProperty
-}
-
-/** @internal */
-export const parseProperties = iterateEager<ObjectParserState, ParsedProperty>()(parsePropertiesOptions)
-const parsePropertiesConcurrent = iterateConcurrent<ObjectParserState, ParsedProperty>()(parsePropertiesOptions)
 
 function combineChecks(a: Checks | undefined, b: Checks | undefined): Checks | undefined {
   if (!a) return b
@@ -3687,9 +2995,6 @@ export interface Union<A extends AST = AST> extends ASTNode {
   readonly encodingChecks: Checks | undefined
   /** @internal */
 
-  getParser(compile: SchemaParser.Compiler, compileField?: SchemaParser.Compiler): SchemaParser.Parser
-  /** @internal */
-
   recur(recur: (ast: AST) => AST): Union<AST>
   /** @internal */
 
@@ -3748,39 +3053,8 @@ export const Union: new<A extends AST = AST>(
     this.encodingChecks = encodingChecks
   }
   /** @internal */
-  override getNode(resolver: Machine.Resolver): Machine.Node<unknown> {
+  override getParser(resolver: Machine.Resolver): Machine.Node<unknown> {
     return Machine.unionNode(this, resolver, getCandidateIndex)
-  }
-  /** @internal */
-  getParser(
-    compile: SchemaParser.Compiler,
-    compileField?: SchemaParser.Compiler
-  ): SchemaParser.Parser {
-    // oxlint-disable-next-line @typescript-eslint/no-this-alias
-    const ast = this
-    const isConstructor = compileField !== undefined
-    const parsers: Array<SchemaParser.Parser> = []
-    const parser = (i: number): SchemaParser.Parser => parsers[i] ??= compile(ast.types[i])
-    let index: CandidateIndex | undefined
-
-    return (input, options) => {
-      if (input === InternalParser.missing) {
-        return InternalParser.missingExit
-      }
-      const candidates = (index ??= getCandidateIndex(ast.types))(input, isConstructor)
-
-      if (candidates.length === 0) {
-        return Effect.fail(new SchemaIssue.AnyOf(ast, [], input, options))
-      }
-      if (candidates.length === 1) {
-        const result = parser(candidates[0])(input, options)
-        if ((result as Exit.Exit<unknown, SchemaIssue.Issue>)._tag === "Success") return result
-        return effectIsExit(result)
-          ? failSingleUnionCandidate(ast, (result as Exit.Failure<unknown, SchemaIssue.Issue>).cause, input, options)
-          : catchSingleUnionCandidate(ast, result, input, options)
-      }
-      return parseUnionCandidates(ast, parser, candidates, input, options)
-    }
   }
   private _rebuild(
     recur: (ast: AST) => AST,
@@ -3847,98 +3121,6 @@ export const Union: new<A extends AST = AST>(
   }
 }
 
-function failSingleUnionCandidate(
-  ast: Union,
-  cause: Cause.Cause<SchemaIssue.Issue>,
-  input: unknown,
-  options: ParseOptions
-) {
-  const issue = InternalSchemaCause.getSchemaIssue(cause)
-  if (!issue) return Exit.failCause(cause)
-  return Exit.fail(new SchemaIssue.AnyOf(ast, [issue], input, options))
-}
-
-function catchSingleUnionCandidate(
-  ast: Union,
-  result: Effect.Effect<unknown, SchemaIssue.Issue, unknown>,
-  input: unknown,
-  options: ParseOptions
-) {
-  return Effect.catchCause(result, (cause) => failSingleUnionCandidate(ast, cause, input, options))
-}
-
-type UnionParserState = {
-  readonly parser: (i: number) => SchemaParser.Parser
-  readonly ast: Union
-  readonly input: unknown
-  readonly options: ParseOptions
-  out: Exit.Success<unknown, SchemaIssue.Issue> | undefined
-  readonly successes: Array<AST> | undefined
-  issues: Array<SchemaIssue.Issue> | undefined
-}
-
-function parseUnionCandidates(
-  ast: Union,
-  parser: (i: number) => SchemaParser.Parser,
-  candidates: ReadonlyArray<number>,
-  input: unknown,
-  options: ParseOptions
-): Effect.Effect<unknown, SchemaIssue.Issue, any> {
-  const state: UnionParserState = {
-    ast,
-    parser,
-    input,
-    out: undefined,
-    successes: ast.options?.mode === "oneOf" ? [] : undefined,
-    issues: undefined,
-    options
-  }
-  const eff = parseUnion(state, candidates)
-  if (!eff) {
-    if (state.out) return state.out
-    return Effect.fail(new SchemaIssue.AnyOf(ast, state.issues ?? [], input, options))
-  }
-  return resumeUnion(eff, state)
-}
-
-function resumeUnion(
-  eff: Effect.Effect<void, SchemaIssue.Issue, any>,
-  state: UnionParserState
-): Effect.Effect<unknown, SchemaIssue.Issue, any> {
-  return Effect.flatMapEager(eff, (_) => {
-    if (state.out === InternalParser.sameExit) return Effect.succeed(state.input)
-    if (state.out) return state.out
-    return Effect.fail(new SchemaIssue.AnyOf(state.ast, state.issues ?? [], state.input, state.options))
-  })
-}
-
-const parseUnion = iterateEager<UnionParserState, number>()({
-  onItem(s, i) {
-    return s.parser(i)(s.input, s.options)
-  },
-  step(s, i, exit) {
-    if (exit._tag === "Failure") {
-      const issue = InternalSchemaCause.getSchemaIssue(exit.cause)
-      if (issue === undefined) {
-        return exit
-      }
-      if (s.issues) s.issues.push(issue)
-      else s.issues = [issue]
-    } else {
-      if (s.out && s.successes) {
-        s.successes.push(s.ast.types[i])
-        return Exit.fail(new SchemaIssue.OneOf(s.ast, s.successes, s.input, s.options))
-      }
-      s.out = exit
-      if (s.successes) {
-        s.successes.push(s.ast.types[i])
-      } else {
-        return Exit.void
-      }
-    }
-  }
-})
-
 const nonFiniteLiterals = new Union([
   new Literal("Infinity"),
   new Literal("-Infinity"),
@@ -3989,9 +3171,6 @@ export interface Suspend extends ASTNode {
   readonly thunk: () => AST
   /** @internal */
 
-  getParser(compile: SchemaParser.Compiler): SchemaParser.Parser
-  /** @internal */
-
   recur(recur: (ast: AST) => AST): Suspend
   /** @internal */
 
@@ -4029,13 +3208,8 @@ export const Suspend: new(
     this.thunk = () => ast ??= thunk()
   }
   /** @internal */
-  override getNode(resolver: Machine.Resolver): Machine.Node<unknown> {
+  override getParser(resolver: Machine.Resolver): Machine.Node<unknown> {
     return Machine.suspendNode(this, resolver)
-  }
-  /** @internal */
-  getParser(compile: SchemaParser.Compiler): SchemaParser.Parser {
-    let parser: SchemaParser.Parser
-    return (input, options) => (parser ??= compile(this.thunk()))(input, options)
   }
   /** @internal */
   recur(recur: (ast: AST) => AST) {
@@ -4793,29 +3967,6 @@ export function containsUndefined(ast: AST): boolean {
       return ast.types.some(containsUndefined)
     default:
       return false
-  }
-}
-
-function fromConst<const T>(
-  ast: AST,
-  value: T
-): SchemaParser.Parser {
-  const succeed = value === 0 ? InternalParser.sameExit : InternalParser.succeed(value)
-  return (input, options) => {
-    if (input === InternalParser.missing) return InternalParser.missingExit
-    if (input === value) return succeed
-    return Effect.fail(new SchemaIssue.InvalidType(ast, input, options))
-  }
-}
-
-function fromRefinement<T>(
-  ast: AST,
-  refinement: (input: unknown) => input is T
-): SchemaParser.Parser {
-  return (input, options) => {
-    if (input === InternalParser.missing) return InternalParser.missingExit
-    if (refinement(input)) return InternalParser.sameExit
-    return Effect.fail(new SchemaIssue.InvalidType(ast, input, options))
   }
 }
 

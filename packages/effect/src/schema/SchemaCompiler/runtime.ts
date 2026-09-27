@@ -7,134 +7,186 @@
  * @since 4.0.0
  */
 import * as Effect from "../../Effect.ts"
-import { effectIsExit, resolveConcurrency } from "../../internal/effect.ts"
-import { lazyParser, type Resolve, resolve, setCompiler, withDecode } from "../../internal/schema/compilerRegistry.ts"
-import * as Interpreter from "../../internal/schema/interpreter.ts"
+import type * as Exit from "../../Exit.ts"
+import { effectIsExit, exit as exitEffect, flatMap, resolveConcurrency, suspend } from "../../internal/effect.ts"
+import { lazyResolver, type Resolve, resolve, setCompiler, withDecode } from "../../internal/schema/compilerRegistry.ts"
+import * as Machine from "../../internal/schema/machine.ts"
 import * as InternalParser from "../../internal/schema/parser.ts"
 import * as SchemaAST from "../../SchemaAST.ts"
 import * as SchemaIssue from "../../SchemaIssue.ts"
-import type { Compiler } from "../../SchemaParser.ts"
+import type { Parser } from "../../SchemaParser.ts"
 import { type Decode, invalid } from "../SchemaCompiler.ts"
 
-type SchemaIssueParser = ReturnType<typeof Interpreter.compile>
-type ObjectParserState = Parameters<typeof SchemaAST.stepProperty>[0]
-type ParsedProperty = Parameters<typeof SchemaAST.stepProperty>[1]
-type ArrayParserState = Parameters<typeof SchemaAST.stepArray>[0]
+type Issue = SchemaIssue.Issue
+type Pending = Effect.Effect<unknown, Issue, any>
+type ParsedProperty = {
+  readonly parser: Parser
+  readonly name: PropertyKey
+  readonly type: SchemaAST.AST
+}
+type ObjectParserState = Machine.Accumulator<Record<PropertyKey, unknown>> & {
+  readonly ast: SchemaAST.Objects
+  readonly out: Record<PropertyKey, unknown>
+}
+type ArrayParserState = Machine.Accumulator<ReadonlyArray<unknown>> & {
+  readonly len: number
+  readonly getParser: (tailThreshold: number, index: number) => { readonly ast: SchemaAST.AST; readonly parser: Parser }
+  readonly tailThreshold: number
+  readonly output: Array<unknown>
+}
+type StepProperty = (
+  state: ObjectParserState,
+  property: ParsedProperty,
+  exit: Exit.Exit<unknown, Issue>
+) => Exit.Exit<void, Issue> | undefined
+type StepArray = (
+  state: ArrayParserState,
+  item: unknown,
+  exit: Exit.Exit<unknown, Issue>,
+  index: number
+) => Exit.Exit<void, Issue> | undefined
+type RunArray = (
+  state: ArrayParserState,
+  input: ReadonlyArray<unknown>,
+  index?: number,
+  end?: number
+) => Effect.Effect<void, Issue, any> | undefined
 type GenerateObject = (context: {
   readonly ast: SchemaAST.Objects
   readonly getProperties: () => ReadonlyArray<ParsedProperty>
-  readonly fallback: SchemaIssueParser
-  readonly resume: (
-    state: ObjectParserState,
-    index: number,
-    pending: Effect.Effect<unknown, SchemaIssue.Issue, any>
-  ) => Effect.Effect<unknown, SchemaIssue.Issue, any>
-  readonly step: typeof SchemaAST.stepProperty
-}) => SchemaIssueParser
+  readonly fallback: Parser
+  readonly resume: (state: ObjectParserState, index: number, pending: Pending) => Pending
+  readonly step: StepProperty
+}) => Parser
 type GenerateArray = (context: {
-  readonly getElement: () => SchemaIssueParser
-  readonly step: typeof SchemaAST.stepArray
+  readonly getElement: () => Parser
+  readonly step: StepArray
   readonly resume: (
     state: ArrayParserState,
     item: unknown,
     index: number,
-    pending: Effect.Effect<unknown, SchemaIssue.Issue, any>,
+    pending: Pending,
     end: number
-  ) => Effect.Effect<void, SchemaIssue.Issue, any>
-}) => typeof SchemaAST.parseArray
+  ) => Effect.Effect<void, Issue, any>
+}) => RunArray
+
+const stepProperty: StepProperty = (state, property, exit) =>
+  Machine.stepKey(state, state.out, property.name, property.type, exit)
+
+const stepArray: StepArray = (state, item, exit, index) =>
+  Machine.stepIndex(state, state.output, index, item, state.getParser(state.tailThreshold, index).ast, exit)
+
+const fieldParser = (plan: Machine.Resolver) => (ast: SchemaAST.AST): Parser => Machine.parser(plan.field(ast))
+
 const makeObjectBase = (
   ast: SchemaAST.Objects,
-  compile: Compiler,
-  compileField: Compiler,
+  plan: Machine.Resolver,
   generate: GenerateObject
-): SchemaIssueParser => {
+): Parser => {
   let properties: Array<ParsedProperty> | undefined
+  const field = fieldParser(plan)
   const getProperties = (): Array<ParsedProperty> => {
     if (properties !== undefined) return properties
-    const parsers = new Map<SchemaAST.AST, SchemaIssueParser>()
+    const parsers = new Map<SchemaAST.AST, Parser>()
     return properties = ast.propertySignatures.map((property) => {
       let parser = parsers.get(property.type)
       if (parser === undefined) {
-        parser = compileField(property.type)
+        parser = field(property.type)
         parsers.set(property.type, parser)
       }
       return { parser, name: property.name, type: property.type }
     })
   }
-  let fallback: SchemaIssueParser | undefined
-  const runFallback: SchemaIssueParser = (input, options) =>
-    (fallback ??= ast.getParser(compile, compileField))(input, options)
-  const resume = (
-    state: ObjectParserState,
-    index: number,
-    pending: Effect.Effect<unknown, SchemaIssue.Issue, any>
-  ): Effect.Effect<unknown, SchemaIssue.Issue, any> => {
+  let fallback: Parser | undefined
+  const runFallback: Parser = (input, options) =>
+    (fallback ??= Machine.parser(Machine.bare(Machine.local(ast, plan))))(input, options)
+  let rest: ReturnType<typeof Machine.structResumer> | undefined
+  const resume = (state: ObjectParserState, index: number, pending: Pending): Pending => {
     const property = properties![index]
-    return Effect.flatMap(Effect.exit(pending), (exit) => {
-      const terminal = SchemaAST.stepProperty(state, property, exit)
+    return flatMap(exitEffect(pending), (exit) => {
+      const terminal = stepProperty(state, property, exit)
       if (terminal) return terminal
-      const done = () => InternalParser.succeed(state.out)
-      const effect = SchemaAST.parseProperties(state, properties!.slice(index + 1))
-      return effect ? Effect.flatMapEager(effect, done) : done()
+      return (rest ??= Machine.structResumer(ast, plan))(state.input, state.out, index + 1, state.options)
     })
   }
-  return generate({ ast, getProperties, fallback: runFallback, resume, step: SchemaAST.stepProperty })
+  return generate({ ast, getProperties, fallback: runFallback, resume, step: stepProperty })
 }
 
 const makeArrayBase = (
   ast: SchemaAST.Arrays,
-  compile: Compiler,
-  compileField: Compiler,
-  generate: GenerateArray
-): SchemaIssueParser => {
-  let element: { readonly ast: SchemaAST.AST; readonly parser: SchemaIssueParser } | undefined
+  plan: Machine.Resolver,
+  generateArray: GenerateArray
+): Parser => {
+  let element: { readonly ast: SchemaAST.AST; readonly parser: Parser } | undefined
   const getElement = () => (element ??= {
     ast: ast.rest[0],
-    parser: compileField(ast.rest[0])
+    parser: fieldParser(plan)(ast.rest[0])
   })
-  let fallback: SchemaIssueParser | undefined
-  const runFallback: SchemaIssueParser = (input, options) =>
-    (fallback ??= ast.getParser(compile, compileField))(input, options)
-  const run = generate({
+  let fallback: Parser | undefined
+  const runFallback: Parser = (input, options) =>
+    (fallback ??= Machine.parser(Machine.bare(Machine.local(ast, plan))))(input, options)
+  const run: RunArray = generateArray({
     getElement: () => getElement().parser,
-    step: SchemaAST.stepArray,
+    step: stepArray,
     resume: (state, item, index, pending, end) =>
-      Effect.flatMap(
-        Effect.exit(pending),
-        (exit) =>
-          SchemaAST.stepArray(state, item, exit, index) ??
-            SchemaAST.parseArray(state, state.input, index + 1, end) ?? Effect.void
+      flatMap(
+        exitEffect(pending),
+        (exit) => stepArray(state, item, exit, index) ?? run(state, state.input, index + 1, end) ?? Effect.void
       )
   })
-  const specialized = Effect.fnUntracedEager(function*(input: unknown, options: SchemaAST.ParseOptions) {
-    if (input === InternalParser.missing) return InternalParser.missing
-    if (!Array.isArray(input)) {
-      return yield* Effect.fail(new SchemaIssue.InvalidType(ast, input, options))
+  const finish = (state: ArrayParserState): Pending =>
+    state.issues
+      ? Effect.fail(new SchemaIssue.Composite(ast, state.issues, state.input, state.options))
+      : InternalParser.succeed(state.output)
+  const specialized: Parser = (input, options) => {
+    try {
+      if (input === InternalParser.missing) return InternalParser.succeed(InternalParser.missing)
+      if (!Array.isArray(input)) return Effect.fail(new SchemaIssue.InvalidType(ast, input, options))
+      const descriptor = getElement()
+      const len = input.length
+      const state: ArrayParserState = {
+        ast,
+        getParser: () => descriptor,
+        input,
+        len,
+        tailThreshold: len,
+        output: new globalThis.Array(len),
+        issues: undefined,
+        options
+      }
+      const effect = run(state, input, 0, len)
+      if (effect === undefined) return finish(state)
+      if (effectIsExit(effect)) return effect._tag === "Failure" ? effect : finish(state)
+      let first = true
+      return suspend(() => {
+        if (!first) return suspend(() => specialized(input, options))
+        first = false
+        return flatMap(effect, () => finish(state))
+      })
+    } catch (error) {
+      return Effect.die(error)
     }
-    const descriptor = getElement()
-    const len = input.length
-    const state: ArrayParserState = {
-      ast,
-      getParser: () => descriptor,
-      input,
-      len,
-      tailThreshold: len,
-      output: new globalThis.Array(len),
-      issues: undefined,
-      options
-    }
-    const effect = run(state, input, 0, len)
-    if (effect) yield* effect
-    if (state.issues) {
-      return yield* Effect.fail(new SchemaIssue.Composite(ast, state.issues, input, options))
-    }
-    return state.output
-  })
+  }
   return (input, options) =>
     options.concurrency !== undefined && resolveConcurrency(options.concurrency) !== 1
       ? runFallback(input, options)
       : specialized(input, options)
 }
+
+const base = (
+  ast: SchemaAST.AST,
+  plan: Machine.Resolver,
+  generate: GenerateObject | undefined,
+  generateArray: GenerateArray | undefined
+): Machine.Node<unknown> =>
+  ast._tag === "Objects" && generate !== undefined
+    ? Machine.checked(ast, () => makeObjectBase(ast, plan, generate))
+    : ast._tag === "Arrays" && generateArray !== undefined
+    ? Machine.checked(ast, () => makeArrayBase(ast, plan, generateArray))
+    : Machine.local(ast, plan)
+
+const hasChecks = (ast: SchemaAST.AST): boolean =>
+  ast.checks !== undefined || ("encodingChecks" in ast && ast.encodingChecks !== undefined)
 
 const decode = (
   ast: SchemaAST.AST,
@@ -143,27 +195,25 @@ const decode = (
   detailed = false,
   makeDecode?: () => Decode,
   generateArray?: GenerateArray
-): SchemaIssueParser => {
-  const child = (ast: SchemaAST.AST) => lazyParser(resolve, ast, detailed ? "decodeEffect" : "parser")
-  const localChild = makeDecode === undefined
-    ? child
-    : (ast: SchemaAST.AST) => lazyParser(resolve, ast, "decodeEffect")
-  const base = ast._tag === "Objects" && generate !== undefined ?
-    makeObjectBase(ast, localChild, localChild, generate)
-    : ast._tag === "Arrays" && generateArray !== undefined
-    ? makeArrayBase(ast, localChild, localChild, generateArray)
-    : makeDecode !== undefined
-    ? ast.getParser(localChild)
-    : undefined
-  const specialize = makeDecode === undefined ? undefined : (local: SchemaIssueParser): SchemaIssueParser => {
+): Parser => {
+  const plan = lazyResolver(resolve, detailed ? "decodeEffect" : "parser", false)
+  let local = base(
+    ast,
+    makeDecode === undefined ? plan : lazyResolver(resolve, "decodeEffect", false),
+    generate,
+    generateArray
+  )
+  const links = ast.encoding
+  if (makeDecode !== undefined && (links !== undefined || hasChecks(ast))) {
     try {
-      return withDecode(makeDecode(), () => local)
+      const fast = makeDecode()
+      const detailedLocal = Machine.parser(local)
+      local = Machine.foreign(ast, () => withDecode(fast, () => detailedLocal))
     } catch {
       // Initialization failure selects the local interpreter, without parsing again.
-      return local
     }
   }
-  return Interpreter.compile(ast, child, undefined, base, specialize)
+  return Machine.parser(links === undefined ? local : Machine.linkOver(ast, links, local, plan))
 }
 
 const make = (
@@ -171,15 +221,11 @@ const make = (
   resolve: Resolve,
   generate?: GenerateObject,
   generateArray?: GenerateArray
-): SchemaIssueParser => {
-  const child = (ast: SchemaAST.AST) => lazyParser(resolve, ast, "makeEffect")
-  const field = (ast: SchemaAST.AST) => Interpreter.compileField(ast, child)
-  const base = generate !== undefined && ast._tag === "Objects" ?
-    makeObjectBase(ast, child, field, generate)
-    : generateArray !== undefined && ast._tag === "Arrays"
-    ? makeArrayBase(ast, child, field, generateArray)
-    : undefined
-  return Interpreter.compile(ast, child, field, base)
+): Parser => {
+  const plan = lazyResolver(resolve, "makeEffect", true)
+  const local = base(ast, plan, generate, generateArray)
+  const links = ast.encoding
+  return Machine.parser(links === undefined ? local : Machine.linkOver(ast, links, local, plan))
 }
 
 const getCheckIssues = (
@@ -235,7 +281,7 @@ const invalidEncoding = (
 ) =>
   index === 0
     ? invalidType(ast, value, options)
-    : Interpreter.wrapEncoding(ast, input, options, invalidType(ast.encoding[index - 1].to, value, options))
+    : Machine.wrapEncoding(invalidType(ast.encoding[index - 1].to, value, options), ast, input, options)
 
 /**
  * @internal
