@@ -87,8 +87,9 @@ function toCodecJsonASTStep(ast: SchemaAST.AST, recur: (ast: SchemaAST.AST) => S
     case "Undefined":
     case "Void":
     case "Literal":
-    case "Number":
       return ast.toCodecJson()
+    case "Number":
+      return SchemaAST.numberToCodecJson(ast)
     case "UniqueSymbol":
     case "Symbol":
     case "BigInt":
@@ -210,8 +211,9 @@ function toCodecStringTreeASTStep(
     case "Unknown":
     case "ObjectKeyword":
       return SchemaAST.replaceEncoding(ast, [SchemaAST.unknownToStringTree])
-    case "Enum":
     case "Number":
+      return SchemaAST.numberToCodecStringTree(ast)
+    case "Enum":
     case "Literal":
     case "UniqueSymbol":
     case "Symbol":

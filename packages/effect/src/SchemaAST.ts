@@ -1814,12 +1814,6 @@ export interface Number extends ASTNode {
   matchPart(s: string, options: ParseOptions): number | undefined
   /** @internal */
 
-  toCodecJson(): AST
-  /** @internal */
-
-  toCodecStringTree(): AST
-  /** @internal */
-
   getExpected(): string
 }
 
@@ -1855,26 +1849,24 @@ export const Number: new(
     return collectIssues(this.checks, value, undefined, this, options) ? undefined : value
   }
   /** @internal */
-  toCodecJson(): AST {
-    if (
-      this.checks &&
-      (hasCheck(this.checks, "effect/schema/isFinite") || hasCheck(this.checks, "effect/schema/isInt"))
-    ) {
-      return this
-    }
-    return replaceEncoding(this, [numberToJson])
-  }
-  /** @internal */
-  toCodecStringTree(): AST {
-    if (this.toCodecJson() === this) {
-      return replaceEncoding(this, [finiteToString])
-    }
-    return replaceEncoding(this, [numberToString])
-  }
-  /** @internal */
   getExpected(): string {
     return "number"
   }
+}
+
+function isFiniteNumber(ast: Number): boolean {
+  return ast.checks !== undefined &&
+    (hasCheck(ast.checks, "effect/schema/isFinite") || hasCheck(ast.checks, "effect/schema/isInt"))
+}
+
+/** @internal */
+export function numberToCodecJson(ast: Number): AST {
+  return isFiniteNumber(ast) ? ast : replaceEncoding(ast, [numberToJson])
+}
+
+/** @internal */
+export function numberToCodecStringTree(ast: Number): AST {
+  return replaceEncoding(ast, [isFiniteNumber(ast) ? finiteToString : numberToString])
 }
 
 function hasCheck(checks: ReadonlyArray<Check<unknown>>, id: string): boolean {
@@ -4030,7 +4022,7 @@ export const parameterFromPropertyKey = applyToSelfOrLastLinkEncodingIdempotent(
     default:
       return ast
     case "Number":
-      return ast.toCodecStringTree()
+      return replaceEncoding(ast, [numberKey])
     case "Union":
       return ast.recur(parameterFromPropertyKey)
   }
@@ -4060,6 +4052,7 @@ const partFromString = applyToSelfOrLastLinkEncodingIdempotent((ast) => {
     default:
       return ast
     case "Number":
+      return numberToCodecStringTree(ast)
     case "Literal":
     case "BigInt":
       return ast.toCodecStringTree()
@@ -4100,6 +4093,8 @@ const finiteToString = new Link(
   finiteString,
   SchemaTransformation.numberFromString
 )
+
+const numberKey = new Link(string, SchemaTransformation.numberFromString)
 
 const numberToString = new Link(
   new Union([finiteString, nonFiniteLiterals]),
