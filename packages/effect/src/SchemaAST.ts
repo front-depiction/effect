@@ -4047,12 +4047,14 @@ export const parameterFromString = applyToSelfOrLastLinkEncodingIdempotent((ast)
   }
 })
 
+const numberKey = new Link(string, SchemaTransformation.numberFromString)
+
 const partFromString = applyToSelfOrLastLinkEncodingIdempotent((ast) => {
   switch (ast._tag) {
     default:
       return ast
     case "Number":
-      return numberToCodecStringTree(ast)
+      return replaceEncoding(ast, [numberKey])
     case "Literal":
     case "BigInt":
       return ast.toCodecStringTree()
@@ -4093,8 +4095,6 @@ const finiteToString = new Link(
   finiteString,
   SchemaTransformation.numberFromString
 )
-
-const numberKey = new Link(string, SchemaTransformation.numberFromString)
 
 const numberToString = new Link(
   new Union([finiteString, nonFiniteLiterals]),
