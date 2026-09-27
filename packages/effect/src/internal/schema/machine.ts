@@ -1329,13 +1329,15 @@ interface SuspendPayload {
 }
 
 const suspendKind: Kind<SuspendPayload> = {
-  fold(node, input) {
+  fold(node, input, depth) {
     const p = node.p
-    return descend(p.target ?? resolveTarget(p), input, DESCEND)
+    const target = p.target ?? resolveTarget(p)
+    return target.kind.fold(target, input, depth + 1)
   },
-  guard(node, input) {
+  guard(node, input, depth) {
     const p = node.p
-    return descend(p.target ?? resolveTarget(p), input, DESCEND_GUARD)
+    const target = p.target ?? resolveTarget(p)
+    return target.kind.guard(target, input, depth + 1)
   }
 }
 
