@@ -853,19 +853,7 @@ function chain(
   const steps: Array<Getter> = []
   for (let i = 0; i < links.length; i++) {
     const transformation = links[i].transformation
-    if (transformation._tag === "Middleware") {
-      return new Node(middlewareKind, ast, undefined, undefined, {
-        steps,
-        links,
-        resolver,
-        parsers: undefined,
-        local,
-        wrap,
-        middleware: transformation,
-        at: i,
-        prefix: undefined
-      })
-    }
+    if (transformation._tag === "Middleware") return transformation.getNode(ast, links, i, local, wrap, resolver)
     steps.push(transformation.decode)
   }
   return new Node(linkKind, ast, undefined, undefined, { steps, links, resolver, parsers: undefined, local, wrap })
@@ -2362,6 +2350,34 @@ function resolvePrefix(p: MiddlewarePayload): Node<unknown> {
 }
 
 const middlewareKind: Kind<MiddlewarePayload> = { fold: foldMiddleware, guard: foldMiddleware }
+
+/** @internal */
+export function middlewareNode(
+  middleware: Middleware,
+  ast: SchemaAST.AST,
+  links: ReadonlyArray<SchemaAST.Link>,
+  at: number,
+  local: Node<unknown> | undefined,
+  wrap: boolean,
+  resolver: Resolver
+): Node<unknown> {
+  const steps: Array<Getter> = []
+  for (let i = 0; i < at; i++) {
+    const transformation = links[i].transformation
+    if (transformation._tag !== "Middleware") steps.push(transformation.decode)
+  }
+  return new Node(middlewareKind, ast, undefined, undefined, {
+    steps,
+    links,
+    resolver,
+    parsers: undefined,
+    local,
+    wrap,
+    middleware,
+    at,
+    prefix: undefined
+  })
+}
 
 const linkParseFrame: FrameKind<LinkPayload, unknown, undefined> = {
   resume(run, frame, result) {

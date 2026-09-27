@@ -19,6 +19,7 @@ import * as Duration from "./Duration.ts"
 import * as Effect from "./Effect.ts"
 import { format, formatDate, formatJson } from "./Formatter.ts"
 import { dual } from "./Function.ts"
+import * as Machine from "./internal/schema/machine.ts"
 import * as Option from "./Option.ts"
 import * as Pipeable from "./Pipeable.ts"
 import * as Predicate from "./Predicate.ts"
@@ -83,6 +84,15 @@ export interface Middleware<in out T, in out E, RDE, RDT, RET, REE> extends Pipe
     options: SchemaAST.ParseOptions
   ) => Effect.Effect<Option.Option<E>, SchemaIssue.Issue, REE>
   flip(): Middleware<E, T, RET, REE, RDE, RDT>
+  /** @internal */
+  getNode(
+    ast: SchemaAST.AST,
+    links: ReadonlyArray<SchemaAST.Link>,
+    at: number,
+    local: Machine.Node<unknown> | undefined,
+    wrap: boolean,
+    resolver: Machine.Resolver
+  ): Machine.Node<unknown>
 }
 
 /**
@@ -127,6 +137,17 @@ export const Middleware: new<T, E, RDE, RDT, RET, REE>(
   }
   flip(): Middleware<E, T, RET, REE, RDE, RDT> {
     return new Middleware(this.encode, this.decode)
+  }
+  /** @internal */
+  getNode(
+    ast: SchemaAST.AST,
+    links: ReadonlyArray<SchemaAST.Link>,
+    at: number,
+    local: Machine.Node<unknown> | undefined,
+    wrap: boolean,
+    resolver: Machine.Resolver
+  ): Machine.Node<unknown> {
+    return Machine.middlewareNode(this, ast, links, at, local, wrap, resolver)
   }
 }
 
