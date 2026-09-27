@@ -24,26 +24,28 @@ import * as InternalParser from "./parser.ts"
 
 type Issue = SchemaIssue.Issue
 type Pending = Effect.Effect<unknown, Issue, unknown>
+type Issues = Arr.NonEmptyArray<Issue> | undefined
 
-const DONE = 0
-const SUSPEND = 1
-type Signal = typeof DONE | typeof SUSPEND
-type Step = Signal | Node<unknown>
+const HALT = Symbol()
+const NONE = Symbol()
 
-const OK = 0
+const LIMIT = 256
+
 const ISSUE = 1
 const CAUSE = 2
+const SUSPEND = 3
+const DESCEND = 4
+const DESCEND_GUARD = 5
 
 const CATCH = 1
 const RESTART = 2
 const GUARD = 4
 
-let rStatus: typeof OK | typeof ISSUE | typeof CAUSE = OK
-let rValue: unknown = undefined
+let rStatus: typeof ISSUE | typeof CAUSE | typeof SUSPEND | typeof DESCEND | typeof DESCEND_GUARD = ISSUE
 let rIssue: Issue | undefined = undefined
 let rCause: Cause.Cause<Issue> = causeEmpty
-let rInput: unknown = undefined
-let rGuard = false
+let rNext: Node<unknown> | undefined = undefined
+let rNextInput: unknown = undefined
 const unplanned = Symbol()
 let rPlanFailure: unknown = unplanned
 const idle: Pending = exitSucceed(undefined)
@@ -52,8 +54,8 @@ let rResult: Exit.Exit<unknown, Issue> | undefined = undefined
 let rOptions: SchemaAST.ParseOptions = {}
 
 interface Kind<P> {
-  enter(node: Node<P>, input: unknown): Step
-  guard(node: Node<P>, input: unknown): Step
+  fold(node: Node<P>, input: unknown, depth: number): unknown
+  guard(node: Node<P>, input: unknown, depth: number): unknown
 }
 
 /** @internal */
@@ -79,7 +81,7 @@ export class Node<P> {
 }
 
 interface FrameKind<P, I, O> {
-  resume(frame: Frame<P, I, O>): Step
+  resume(frame: Frame<P, I, O>, result: unknown): unknown
   copy(out: O): O
 }
 
@@ -91,7 +93,7 @@ class Frame<P, I, O> {
   i: number
   j: number
   value: unknown
-  acc: Arr.NonEmptyArray<Issue> | undefined
+  acc: Issues
   flags: number
   constructor(
     kind: FrameKind<P, I, O>,
@@ -101,7 +103,7 @@ class Frame<P, I, O> {
     i: number,
     j: number,
     value: unknown,
-    acc: Arr.NonEmptyArray<Issue> | undefined,
+    acc: Issues,
     flags: number
   ) {
     this.kind = kind
@@ -121,18 +123,20 @@ type AnyFrame = Frame<unknown, unknown, unknown>
 const stack: Array<AnyFrame> = []
 let sp = 0
 
-function push<P, I, O>(
+function spill<P, I, O>(
   kind: FrameKind<P, I, O>,
   node: Node<P>,
   input: I,
   out: O,
   i: number,
   j: number,
+  value: unknown,
+  acc: Issues,
   flags: number
-): void {
+): typeof HALT {
   const frame = stack[sp]
   if (frame === undefined) {
-    stack[sp] = new Frame(kind, node, input, out, i, j, undefined, undefined, flags)
+    stack[sp] = new Frame(kind, node, input, out, i, j, value, acc, flags)
   } else {
     frame.kind = kind
     frame.node = node
@@ -140,11 +144,12 @@ function push<P, I, O>(
     frame.out = out
     frame.i = i
     frame.j = j
-    frame.value = undefined
-    frame.acc = undefined
+    frame.value = value
+    frame.acc = acc
     frame.flags = flags
   }
   sp++
+  return HALT
 }
 
 function pop(): void {
@@ -159,58 +164,56 @@ function popTo(base: number): void {
   while (sp > base) pop()
 }
 
+function reverse(from: number, to: number): void {
+  for (let a = from, b = to - 1; a < b; a++, b--) {
+    const frame = stack[a]
+    stack[a] = stack[b]
+    stack[b] = frame
+  }
+}
+
 function release<A>(settled: A): A {
-  rValue = undefined
-  rInput = undefined
   rIssue = undefined
   rCause = causeEmpty
   rResult = undefined
   rPending = idle
+  rNext = undefined
+  rNextInput = undefined
   return settled
 }
 
-function succeed(value: unknown): Signal {
-  rStatus = OK
-  rValue = value
-  return DONE
-}
-
-function failIssue(issue: Issue): Signal {
+function failIssue(issue: Issue): typeof HALT {
   rStatus = ISSUE
   rIssue = issue
-  return DONE
+  return HALT
 }
 
-function failCause(cause: Cause.Cause<Issue>): Signal {
+function failCause(cause: Cause.Cause<Issue>): typeof HALT {
   rStatus = CAUSE
   rCause = cause
-  return DONE
+  return HALT
 }
 
-function deliver(result: Exit.Exit<unknown, Issue>, input: unknown): Signal {
+function deliver(result: Exit.Exit<unknown, Issue>, input: unknown): unknown {
   if (result._tag === "Failure") return failCause(result.cause)
-  return succeed(result === InternalParser.sameExit ? input : result.value)
+  return result === InternalParser.sameExit ? input : result.value
 }
 
-function suspendOn(pending: Pending): Signal {
+function suspendOn(pending: Pending): typeof HALT {
   rPending = pending
-  return SUSPEND
+  rStatus = SUSPEND
+  return HALT
 }
 
-function enterChild(node: Node<unknown>, input: unknown): Step {
-  rInput = input
-  return node
+function descend(node: Node<unknown>, input: unknown, status: typeof DESCEND | typeof DESCEND_GUARD): typeof HALT {
+  rNext = node
+  rNextInput = input
+  rStatus = status
+  return HALT
 }
 
-function guardChild(node: Node<unknown>, input: unknown): Step {
-  rInput = input
-  rGuard = true
-  return node
-}
-
-function add<P, I, O>(frame: Frame<P, I, O>, issue: Issue): void {
-  if (frame.acc) frame.acc.push(issue)
-  else frame.acc = [issue]
+function spilled(result: unknown): boolean {
+  return result === HALT && rStatus >= SUSPEND
 }
 
 function schemaIssue(): Issue | undefined {
@@ -221,13 +224,9 @@ function failureExit(): Exit.Exit<never, Issue> {
   return rStatus === ISSUE && rIssue !== undefined ? exitFail(rIssue) : exitFailCause(rCause)
 }
 
-function result(): Exit.Exit<unknown, Issue> {
-  return rStatus === OK ? exitSucceed(rValue) : failureExit()
-}
-
-function complete(node: Node<unknown>, input: unknown, value: unknown): Signal {
+function complete(node: Node<unknown>, input: unknown, value: unknown): unknown {
   const options = rOptions
-  if (options.disableChecks) return succeed(value)
+  if (options.disableChecks) return value
   const encodingChecks = node.encodingChecks
   if (encodingChecks !== undefined && input !== InternalParser.missing && value !== InternalParser.missing) {
     const issues = collectIssues(encodingChecks, input, undefined, node.ast, options)
@@ -238,40 +237,38 @@ function complete(node: Node<unknown>, input: unknown, value: unknown): Signal {
     const issues = collectIssues(checks, value, undefined, node.ast, options)
     if (issues) return failIssue(new SchemaIssue.Composite(node.ast, issues, value, options))
   }
-  return succeed(value)
+  return value
 }
 
-function invalidType(node: Node<unknown>, input: unknown): Signal {
+function done(node: Node<unknown>, input: unknown): unknown {
+  return node.checks === undefined ? input : complete(node, input, input)
+}
+
+function finish(node: Node<unknown>, input: unknown, value: unknown): unknown {
+  return node.checks === undefined && node.encodingChecks === undefined ? value : complete(node, input, value)
+}
+
+function invalidType(node: Node<unknown>, input: unknown): typeof HALT {
   return failIssue(new SchemaIssue.InvalidType(node.ast, input, rOptions))
 }
 
-function keyFailure<P, I, O>(frame: Frame<P, I, O>, key: PropertyKey): Signal | undefined {
+function die(error: unknown): typeof HALT {
+  return failCause(causeDie(error))
+}
+
+function keyIssue(node: Node<unknown>, input: unknown, key: PropertyKey): Issue | typeof HALT {
   const options = rOptions
   let issue = rIssue
   if (rStatus === CAUSE) {
     const cause = rCause
-    if (cause.reasons.length === 0) {
-      pop()
-      return DONE
-    }
+    if (cause.reasons.length === 0) return HALT
     issue = getSchemaIssue(cause)
-    if (issue === undefined) {
-      const ast = frame.node.ast
-      const input = frame.input
-      pop()
-      return failCause(pointCause(cause, ast, key, input, options))
-    }
+    if (issue === undefined) return failCause(pointCause(cause, node.ast, key, input, options))
   }
-  if (issue === undefined) return undefined
+  if (issue === undefined) return HALT
   const pointer = new SchemaIssue.Pointer([key], issue)
-  if (options.errors === "all") {
-    add(frame, pointer)
-    return undefined
-  }
-  const ast = frame.node.ast
-  const input = frame.input
-  pop()
-  return failIssue(new SchemaIssue.Composite(ast, [pointer], input, options))
+  if (options.errors === "all") return pointer
+  return failIssue(new SchemaIssue.Composite(node.ast, [pointer], input, options))
 }
 
 function pointCause(
@@ -287,74 +284,63 @@ function pointCause(
   )
 }
 
-function missingKey<P, I, O>(frame: Frame<P, I, O>, key: PropertyKey, child: SchemaAST.AST): Signal | undefined {
+function missingKey(node: Node<unknown>, input: unknown, key: PropertyKey, child: SchemaAST.AST): Issue | typeof HALT {
   const options = rOptions
   const issue = new SchemaIssue.Pointer([key], new SchemaIssue.MissingKey(child.context?.annotations))
-  if (options.errors === "all") {
-    add(frame, issue)
-    return undefined
-  }
-  const ast = frame.node.ast
-  const input = frame.input
-  pop()
-  return failIssue(new SchemaIssue.Composite(ast, [issue], input, options))
+  if (options.errors === "all") return issue
+  return failIssue(new SchemaIssue.Composite(node.ast, [issue], input, options))
 }
 
-function decodeLoop(base: number, step: Step): Signal {
+function drain(base: number, segment: number, result: unknown): unknown {
   while (true) {
-    if (typeof step !== "number") {
-      step = step.kind.enter(step, rInput)
-    } else if (step === SUSPEND || sp === base) {
-      return step
+    if (result === HALT && rStatus >= SUSPEND) {
+      reverse(segment, sp)
+      segment = sp
+      const next = rNext
+      if (rStatus === SUSPEND || next === undefined) return HALT
+      const input = rNextInput
+      rNext = undefined
+      rNextInput = undefined
+      result = rStatus === DESCEND ? next.kind.fold(next, input, 0) : next.kind.guard(next, input, 0)
+    } else if (sp === base) {
+      return result
     } else {
       const frame = stack[sp - 1]
-      step = frame.kind.resume(frame)
+      segment = sp - 1
+      result = frame.kind.resume(frame, result)
     }
   }
 }
 
-function guardLoop(base: number, step: Step): Signal {
-  while (true) {
-    if (typeof step !== "number") {
-      if (rGuard) {
-        rGuard = false
-        step = step.kind.guard(step, rInput)
-      } else {
-        step = step.kind.enter(step, rInput)
-      }
-    } else if (step === SUSPEND || sp === base) {
-      return step
-    } else {
-      const frame = stack[sp - 1]
-      step = frame.kind.resume(frame)
-    }
-  }
-}
-
-type Loop = (base: number, step: Step) => Signal
-
-function drive(loop: Loop, base: number, step: Step, previous: SchemaAST.ParseOptions, root: boolean): Signal {
+function drive(
+  base: number,
+  segment: number,
+  result: unknown,
+  previous: SchemaAST.ParseOptions,
+  root: boolean
+): unknown {
   while (true) {
     try {
-      return loop(base, step)
+      return drain(base, segment, result)
     } catch (error) {
-      step = unwind(base, error, previous, root)
+      result = unwind(base, error, previous, root)
+      segment = sp
     }
   }
 }
 
-function unwind(base: number, error: unknown, previous: SchemaAST.ParseOptions, root: boolean): Signal {
+function unwind(base: number, error: unknown, previous: SchemaAST.ParseOptions, root: boolean): unknown {
   rResult = undefined
   let k = sp
   while (k > base) {
     if (stack[--k].flags & CATCH) {
       popTo(k)
-      return failCause(causeDie(error))
+      return die(error)
     }
   }
   popTo(base)
   if (root) {
-    if (error !== rPlanFailure) return failCause(causeDie(error))
+    if (error !== rPlanFailure) return die(error)
     rPlanFailure = unplanned
   }
   rOptions = previous
@@ -366,15 +352,40 @@ function planned<A>(error: unknown): A {
   throw error
 }
 
+function run(
+  node: Node<unknown>,
+  input: unknown,
+  base: number,
+  previous: SchemaAST.ParseOptions,
+  root: boolean
+): unknown {
+  let result: unknown
+  try {
+    result = node.kind.fold(node, input, 0)
+  } catch (error) {
+    result = unwind(base, error, previous, root)
+  }
+  return result === HALT ? drive(base, base, result, previous, root) : result
+}
+
+function runGuard(node: Node<unknown>, input: unknown, base: number, previous: SchemaAST.ParseOptions): unknown {
+  let result: unknown
+  try {
+    result = node.kind.guard(node, input, 0)
+  } catch (error) {
+    result = unwind(base, error, previous, true)
+  }
+  return result === HALT ? drive(base, base, result, previous, true) : result
+}
+
 interface Snapshot {
   readonly frames: ReadonlyArray<AnyFrame>
   readonly restart: number
   readonly options: SchemaAST.ParseOptions
-  readonly guard: boolean
   readonly pending: Pending
 }
 
-function snapshot(base: number, options: SchemaAST.ParseOptions, guard: boolean): Snapshot {
+function snapshot(base: number, options: SchemaAST.ParseOptions): Snapshot {
   const frames: Array<AnyFrame> = []
   let restart = -1
   for (let k = base; k < sp; k++) {
@@ -395,21 +406,29 @@ function snapshot(base: number, options: SchemaAST.ParseOptions, guard: boolean)
     )
   }
   popTo(base)
-  return { frames, restart, options, guard, pending: rPending }
+  return { frames, restart, options, pending: rPending }
 }
 
 function restore(frames: ReadonlyArray<AnyFrame>, end: number): void {
   for (let k = 0; k < end; k++) {
     const frame = frames[k]
-    push(frame.kind, frame.node, frame.input, frame.kind.copy(frame.out), frame.i, frame.j, frame.flags)
-    const top = stack[sp - 1]
-    top.value = frame.value
-    if (frame.acc) top.acc = [frame.acc[0], ...frame.acc.slice(1)]
+    spill(
+      frame.kind,
+      frame.node,
+      frame.input,
+      frame.kind.copy(frame.out),
+      frame.i,
+      frame.j,
+      frame.value,
+      frame.acc ? [frame.acc[0], ...frame.acc.slice(1)] : undefined,
+      frame.flags
+    )
   }
 }
 
-function settle(base: number, signal: Signal, options: SchemaAST.ParseOptions, guard: boolean): Pending {
-  if (signal === DONE) return result()
+function settle(base: number, result: unknown, options: SchemaAST.ParseOptions): Pending {
+  if (result !== HALT) return exitSucceed(result)
+  if (rStatus !== SUSPEND) return failureExit()
   if (sp - base === 1) {
     const frame = stack[base]
     if (frame.kind === suspensionFrame && frame.node.checks === undefined && frame.node.encodingChecks === undefined) {
@@ -417,7 +436,7 @@ function settle(base: number, signal: Signal, options: SchemaAST.ParseOptions, g
       return rPending
     }
   }
-  return describe(snapshot(base, options, guard))
+  return describe(snapshot(base, options))
 }
 
 function describe(k: Snapshot): Pending {
@@ -435,9 +454,9 @@ function resume(k: Snapshot, result: Exit.Exit<unknown, Issue>): Pending {
   rOptions = k.options
   const base = sp
   restore(k.frames, k.frames.length)
-  const signal = drive(k.guard ? guardLoop : decodeLoop, base, deliver(result, undefined), previous, false)
+  const value = drive(base, sp, deliver(result, undefined), previous, false)
   rOptions = previous
-  return release(settle(base, signal, k.options, k.guard))
+  return release(settle(base, value, k.options))
 }
 
 function restart(k: Snapshot): Pending {
@@ -445,16 +464,18 @@ function restart(k: Snapshot): Pending {
   rOptions = k.options
   const base = sp
   restore(k.frames, k.restart)
+  const segment = sp
   const frame = k.frames[k.restart]
-  const signal = drive(
-    k.guard ? guardLoop : decodeLoop,
-    base,
-    frame.flags & GUARD ? guardChild(frame.node, frame.input) : enterChild(frame.node, frame.input),
-    previous,
-    false
-  )
+  const node = frame.node
+  let result: unknown
+  try {
+    result = frame.flags & GUARD ? node.kind.guard(node, frame.input, 0) : node.kind.fold(node, frame.input, 0)
+  } catch (error) {
+    result = unwind(base, error, previous, false)
+  }
+  const value = drive(base, segment, result, previous, false)
   rOptions = previous
-  return release(settle(base, signal, k.options, k.guard))
+  return release(settle(base, value, k.options))
 }
 
 /** @internal */
@@ -468,15 +489,17 @@ export function decode(
   const previous = rOptions
   rOptions = options
   const base = sp
-  const signal = drive(decodeLoop, base, enterChild(node, input), previous, root)
+  const value = run(node, input, base, previous, root)
   rOptions = previous
-  return release(
-    signal === DONE && node.kind === foreignKind && rResult !== undefined
-      ? rResult
-      : signal === DONE && rStatus === OK && rValue === input && input !== InternalParser.missing
-      ? InternalParser.sameExit
-      : settle(base, signal, options, false)
-  )
+  const result = rResult
+  if (result !== undefined) {
+    rResult = undefined
+    if (node.kind === foreignKind && (value !== HALT || rStatus < SUSPEND)) return release(result)
+  }
+  if (value !== HALT) {
+    return value === input && input !== InternalParser.missing ? InternalParser.sameExit : exitSucceed(value)
+  }
+  return release(settle(base, value, options))
 }
 
 /** @internal */
@@ -485,135 +508,134 @@ export function guard(node: Node<unknown>, input: unknown, options: SchemaAST.Pa
   const previous = rOptions
   rOptions = options
   const base = sp
-  const signal = drive(guardLoop, base, guardChild(node, input), previous, true)
+  const value = runGuard(node, input, base, previous)
   rOptions = previous
-  return release(
-    signal === DONE && rStatus === OK && rValue === input && input !== InternalParser.missing
-      ? InternalParser.sameExit
-      : settle(base, signal, options, true)
-  )
+  if (value !== HALT) {
+    return value === input && input !== InternalParser.missing ? InternalParser.sameExit : exitSucceed(value)
+  }
+  return release(settle(base, value, options))
 }
 
 const identity = <O>(out: O): O => out
 
 const suspensionFrame: FrameKind<unknown, unknown, undefined> = {
-  resume(frame) {
+  resume(frame, result) {
     const node = frame.node
     const input = frame.input
     pop()
-    return rStatus === OK ? complete(node, input, rValue) : DONE
+    return result === HALT ? HALT : complete(node, input, result)
   },
   copy: identity
 }
 
-function suspendAt(node: Node<unknown>, input: unknown, pending: Pending): Signal {
-  push(suspensionFrame, node, input, undefined, 0, 0, 0)
+function suspendAt(node: Node<unknown>, input: unknown, pending: Pending): typeof HALT {
+  spill(suspensionFrame, node, input, undefined, 0, 0, undefined, undefined, 0)
   return suspendOn(pending)
 }
 
-function enterString(node: Node<undefined>, input: unknown): Step {
-  if (input === InternalParser.missing) return succeed(input)
-  return typeof input === "string" ? complete(node, input, input) : invalidType(node, input)
+function foldString(node: Node<undefined>, input: unknown): unknown {
+  if (input === InternalParser.missing) return input
+  return typeof input === "string" ? done(node, input) : invalidType(node, input)
 }
 
-const stringKind: Kind<undefined> = { enter: enterString, guard: enterString }
+const stringKind: Kind<undefined> = { fold: foldString, guard: foldString }
 
-function enterNumber(node: Node<undefined>, input: unknown): Step {
-  if (input === InternalParser.missing) return succeed(input)
-  return typeof input === "number" ? complete(node, input, input) : invalidType(node, input)
+function foldNumber(node: Node<undefined>, input: unknown): unknown {
+  if (input === InternalParser.missing) return input
+  return typeof input === "number" ? done(node, input) : invalidType(node, input)
 }
 
-const numberKind: Kind<undefined> = { enter: enterNumber, guard: enterNumber }
+const numberKind: Kind<undefined> = { fold: foldNumber, guard: foldNumber }
 
-function enterBoolean(node: Node<undefined>, input: unknown): Step {
-  if (input === InternalParser.missing) return succeed(input)
-  return typeof input === "boolean" ? complete(node, input, input) : invalidType(node, input)
+function foldBoolean(node: Node<undefined>, input: unknown): unknown {
+  if (input === InternalParser.missing) return input
+  return typeof input === "boolean" ? done(node, input) : invalidType(node, input)
 }
 
-const booleanKind: Kind<undefined> = { enter: enterBoolean, guard: enterBoolean }
+const booleanKind: Kind<undefined> = { fold: foldBoolean, guard: foldBoolean }
 
-function enterBigInt(node: Node<undefined>, input: unknown): Step {
-  if (input === InternalParser.missing) return succeed(input)
-  return typeof input === "bigint" ? complete(node, input, input) : invalidType(node, input)
+function foldBigInt(node: Node<undefined>, input: unknown): unknown {
+  if (input === InternalParser.missing) return input
+  return typeof input === "bigint" ? done(node, input) : invalidType(node, input)
 }
 
-const bigintKind: Kind<undefined> = { enter: enterBigInt, guard: enterBigInt }
+const bigintKind: Kind<undefined> = { fold: foldBigInt, guard: foldBigInt }
 
-function enterSymbol(node: Node<undefined>, input: unknown): Step {
-  if (input === InternalParser.missing) return succeed(input)
-  return typeof input === "symbol" ? complete(node, input, input) : invalidType(node, input)
+function foldSymbol(node: Node<undefined>, input: unknown): unknown {
+  if (input === InternalParser.missing) return input
+  return typeof input === "symbol" ? done(node, input) : invalidType(node, input)
 }
 
-const symbolKind: Kind<undefined> = { enter: enterSymbol, guard: enterSymbol }
+const symbolKind: Kind<undefined> = { fold: foldSymbol, guard: foldSymbol }
 
-function enterObjectKeyword(node: Node<undefined>, input: unknown): Step {
-  if (input === InternalParser.missing) return succeed(input)
+function foldObjectKeyword(node: Node<undefined>, input: unknown): unknown {
+  if (input === InternalParser.missing) return input
   return (typeof input === "object" && input !== null) || typeof input === "function"
-    ? complete(node, input, input)
+    ? done(node, input)
     : invalidType(node, input)
 }
 
-const objectKeywordKind: Kind<undefined> = { enter: enterObjectKeyword, guard: enterObjectKeyword }
+const objectKeywordKind: Kind<undefined> = { fold: foldObjectKeyword, guard: foldObjectKeyword }
 
-function enterNotNullish(node: Node<undefined>, input: unknown): Step {
-  if (input === InternalParser.missing) return succeed(input)
-  return input != null ? complete(node, input, input) : invalidType(node, input)
+function foldNotNullish(node: Node<undefined>, input: unknown): unknown {
+  if (input === InternalParser.missing) return input
+  return input != null ? done(node, input) : invalidType(node, input)
 }
 
-const notNullishKind: Kind<undefined> = { enter: enterNotNullish, guard: enterNotNullish }
+const notNullishKind: Kind<undefined> = { fold: foldNotNullish, guard: foldNotNullish }
 
-function enterAny(node: Node<undefined>, input: unknown): Step {
-  if (input === InternalParser.missing) return succeed(input)
-  return complete(node, input, input)
+function foldAny(node: Node<undefined>, input: unknown): unknown {
+  if (input === InternalParser.missing) return input
+  return done(node, input)
 }
 
-const anyKind: Kind<undefined> = { enter: enterAny, guard: enterAny }
+const anyKind: Kind<undefined> = { fold: foldAny, guard: foldAny }
 
-function enterNever(node: Node<undefined>, input: unknown): Step {
-  if (input === InternalParser.missing) return succeed(input)
+function foldNever(node: Node<undefined>, input: unknown): unknown {
+  if (input === InternalParser.missing) return input
   return invalidType(node, input)
 }
 
-const neverKind: Kind<undefined> = { enter: enterNever, guard: enterNever }
+const neverKind: Kind<undefined> = { fold: foldNever, guard: foldNever }
 
-function enterConst(node: Node<unknown>, input: unknown): Step {
-  if (input === InternalParser.missing) return succeed(input)
+function foldConst(node: Node<unknown>, input: unknown): unknown {
+  if (input === InternalParser.missing) return input
   const value = node.p
-  if (input === value) return complete(node, input, value === 0 ? input : value)
-  return invalidType(node, input)
+  if (input !== value) return invalidType(node, input)
+  return value === 0 ? done(node, input) : node.checks === undefined ? value : complete(node, input, value)
 }
 
-const constKind: Kind<unknown> = { enter: enterConst, guard: enterConst }
+const constKind: Kind<unknown> = { fold: foldConst, guard: foldConst }
 
-function enterVoid(node: Node<undefined>, input: unknown): Step {
-  if (input === InternalParser.missing) return succeed(input)
-  return complete(node, input, undefined)
+function foldVoid(node: Node<undefined>, input: unknown): unknown {
+  if (input === InternalParser.missing) return input
+  return node.checks === undefined ? undefined : complete(node, input, undefined)
 }
 
-const voidKind: Kind<undefined> = { enter: enterVoid, guard: enterVoid }
+const voidKind: Kind<undefined> = { fold: foldVoid, guard: foldVoid }
 
-function enterEnum(node: Node<ReadonlySet<unknown>>, input: unknown): Step {
-  if (input === InternalParser.missing) return succeed(input)
-  return node.p.has(input) ? complete(node, input, input) : invalidType(node, input)
+function foldEnum(node: Node<ReadonlySet<unknown>>, input: unknown): unknown {
+  if (input === InternalParser.missing) return input
+  return node.p.has(input) ? done(node, input) : invalidType(node, input)
 }
 
-const enumKind: Kind<ReadonlySet<unknown>> = { enter: enterEnum, guard: enterEnum }
+const enumKind: Kind<ReadonlySet<unknown>> = { fold: foldEnum, guard: foldEnum }
 
 interface ForeignPayload {
   readonly get: () => Parser
   parser: Parser | undefined
 }
 
-function enterForeign(node: Node<ForeignPayload>, input: unknown): Step {
+function foldForeign(node: Node<ForeignPayload>, input: unknown, depth: number): unknown {
   const p = node.p
   const parser = p.parser ??= p.get()
   const result = parser(input, rOptions)
   if (!effectIsExit(result)) return suspendAt(node, input, result)
-  rResult = result
+  if (depth === 0) rResult = result
   return deliver(result, input)
 }
 
-const foreignKind: Kind<ForeignPayload> = { enter: enterForeign, guard: enterForeign }
+const foreignKind: Kind<ForeignPayload> = { fold: foldForeign, guard: foldForeign }
 
 /** @internal */
 export interface Resolver {
@@ -759,113 +781,177 @@ type Struct = Record<PropertyKey, unknown>
 const isStruct = (input: unknown): input is Struct =>
   typeof input === "object" && input !== null && !Array.isArray(input)
 
-function copyStruct(out: Struct | undefined): Struct | undefined {
-  if (out === undefined) return out
+function copyStruct(out: Struct): Struct {
   const copy: Struct = {}
   for (const key of Reflect.ownKeys(out)) InternalRecord.assignProperty(copy, key, out[key])
   return copy
 }
 
-function enterStruct(
-  node: Node<StructPayload>,
-  input: unknown,
-  frame: FrameKind<StructPayload, Struct, Struct | undefined>,
-  out: boolean
-): Step {
-  if (input === InternalParser.missing) return succeed(input)
+function propertyValue(input: Struct, key: PropertyKey): unknown {
+  return (key === "__proto__" ? Object.hasOwn(input, key) : key in input) ? input[key] : InternalParser.missing
+}
+
+function foldStruct(node: Node<StructPayload>, input: unknown, depth: number): unknown {
+  if (input === InternalParser.missing) return input
+  if (depth >= LIMIT) return descend(node, input, DESCEND)
   const options = rOptions
   if (options.errors !== "all" && options.onExcessProperty === undefined) {
     if (!isStruct(input)) return invalidType(node, input)
     properties(node.p)
-    push(frame, node, input, out ? {} : undefined, 0, 0, out ? CATCH : CATCH | GUARD)
-    return property(node, input, 0)
+    return structLoop(node, input, {}, 0, undefined, NONE, depth, CATCH)
   }
-  push(frame, node, input, undefined, 0, 0, out ? CATCH | RESTART : CATCH | RESTART | GUARD)
-  if (!isStruct(input)) {
-    pop()
-    return invalidType(node, input)
+  return structAccumulate(node, input, depth, false)
+}
+
+function guardStruct(node: Node<StructPayload>, input: unknown, depth: number): unknown {
+  if (node.checks !== undefined || node.encodingChecks !== undefined) return foldStruct(node, input, depth)
+  if (input === InternalParser.missing) return input
+  if (depth >= LIMIT) return descend(node, input, DESCEND_GUARD)
+  const options = rOptions
+  if (options.errors !== "all" && options.onExcessProperty === undefined) {
+    if (!isStruct(input)) return invalidType(node, input)
+    properties(node.p)
+    return structGuardLoop(node, input, 0, undefined, NONE, depth, CATCH | GUARD)
   }
-  properties(node.p)
-  if (out) stack[sp - 1].out = {}
-  if (options.onExcessProperty === "error") {
-    const expected = node.p.expected
-    const keys = Reflect.ownKeys(input)
-    for (let i = 0; i < keys.length; i++) {
-      const key = keys[i]
-      if (!expected.has(key) && Object.prototype.propertyIsEnumerable.call(input, key)) {
-        const issue = new SchemaIssue.Pointer([key], new SchemaIssue.UnexpectedKey(node.ast, input[key], options))
-        if (options.errors !== "all") {
-          pop()
-          return failIssue(new SchemaIssue.Composite(node.ast, [issue], input, options))
+  return structAccumulate(node, input, depth, true)
+}
+
+function structAccumulate(node: Node<StructPayload>, input: unknown, depth: number, guard: boolean): unknown {
+  let acc: Issues
+  try {
+    if (!isStruct(input)) return invalidType(node, input)
+    properties(node.p)
+    const options = rOptions
+    if (options.onExcessProperty === "error") {
+      const expected = node.p.expected
+      const keys = Reflect.ownKeys(input)
+      for (let i = 0; i < keys.length; i++) {
+        const key = keys[i]
+        if (!expected.has(key) && Object.prototype.propertyIsEnumerable.call(input, key)) {
+          const issue = new SchemaIssue.Pointer([key], new SchemaIssue.UnexpectedKey(node.ast, input[key], options))
+          if (options.errors !== "all") return failIssue(new SchemaIssue.Composite(node.ast, [issue], input, options))
+          if (acc) acc.push(issue)
+          else acc = [issue]
         }
-        add(stack[sp - 1], issue)
       }
     }
+  } catch (error) {
+    return die(error)
   }
-  return property(node, input, 0)
+  return guard
+    ? structGuardLoop(node, input, 0, acc, NONE, depth, CATCH | RESTART | GUARD)
+    : structLoop(node, input, {}, 0, acc, NONE, depth, CATCH | RESTART)
 }
 
-const structKind: Kind<StructPayload> = {
-  enter(node, input) {
-    return enterStruct(node, input, structFrame, true)
+function structLoop(
+  node: Node<StructPayload>,
+  input: Struct,
+  out: Struct,
+  i: number,
+  acc: Issues,
+  result: unknown,
+  depth: number,
+  flags: number
+): unknown {
+  const p = node.p
+  const keys = p.keys
+  const children = properties(p)
+  try {
+    for (; i < keys.length; i++) {
+      const key = keys[i]
+      if (result === NONE) {
+        const child = children[i]
+        result = child.kind.fold(child, propertyValue(input, key), depth + 1)
+      }
+      if (result === HALT) {
+        if (rStatus >= SUSPEND) return spill(structFrame, node, input, out, i, 0, undefined, acc, flags)
+        const issue = keyIssue(node, input, key)
+        if (issue === HALT) return HALT
+        if (acc) acc.push(issue)
+        else acc = [issue]
+      } else if (result !== InternalParser.missing) {
+        InternalRecord.assignProperty(out, key, result)
+      } else if (!children[i].ast.context?.isOptional) {
+        const issue = missingKey(node, input, key, children[i].ast)
+        if (issue === HALT) return HALT
+        if (acc) acc.push(issue)
+        else acc = [issue]
+      }
+      result = NONE
+    }
+  } catch (error) {
+    return die(error)
+  }
+  if (acc) return failIssue(new SchemaIssue.Composite(node.ast, acc, input, rOptions))
+  return finish(node, input, out)
+}
+
+function structGuardLoop(
+  node: Node<StructPayload>,
+  input: Struct,
+  i: number,
+  acc: Issues,
+  result: unknown,
+  depth: number,
+  flags: number
+): unknown {
+  const p = node.p
+  const keys = p.keys
+  const children = properties(p)
+  try {
+    for (; i < keys.length; i++) {
+      const key = keys[i]
+      if (result === NONE) {
+        const child = children[i]
+        result = child.kind.guard(child, propertyValue(input, key), depth + 1)
+      }
+      if (result === HALT) {
+        if (rStatus >= SUSPEND) return spill(structGuardFrame, node, input, undefined, i, 0, undefined, acc, flags)
+        const issue = keyIssue(node, input, key)
+        if (issue === HALT) return HALT
+        if (acc) acc.push(issue)
+        else acc = [issue]
+      } else if (result === InternalParser.missing && !children[i].ast.context?.isOptional) {
+        const issue = missingKey(node, input, key, children[i].ast)
+        if (issue === HALT) return HALT
+        if (acc) acc.push(issue)
+        else acc = [issue]
+      }
+      result = NONE
+    }
+  } catch (error) {
+    return die(error)
+  }
+  if (acc) return failIssue(new SchemaIssue.Composite(node.ast, acc, input, rOptions))
+  return input
+}
+
+const structKind: Kind<StructPayload> = { fold: foldStruct, guard: guardStruct }
+
+const structFrame: FrameKind<StructPayload, Struct, Struct> = {
+  resume(frame, result) {
+    const node = frame.node
+    const input = frame.input
+    const out = frame.out
+    const i = frame.i
+    const acc = frame.acc
+    const flags = frame.flags
+    pop()
+    return structLoop(node, input, out, i, acc, result, 0, flags)
   },
-  guard(node, input) {
-    return node.checks === undefined && node.encodingChecks === undefined
-      ? enterStruct(node, input, structGuardFrame, false)
-      : enterStruct(node, input, structFrame, true)
-  }
-}
-
-function property(node: Node<StructPayload>, input: Struct, i: number): Step {
-  const keys = node.p.keys
-  if (i === keys.length) return finishStruct()
-  const key = keys[i]
-  const child = properties(node.p)[i]
-  const value = (key === "__proto__" ? Object.hasOwn(input, key) : key in input) ? input[key] : InternalParser.missing
-  return stack[sp - 1].kind === structFrame ? enterChild(child, value) : guardChild(child, value)
-}
-
-function finishStruct(): Signal {
-  const frame = stack[sp - 1]
-  const node = frame.node
-  const input = frame.input
-  const out = frame.out
-  const issues = frame.acc
-  pop()
-  if (issues) return failIssue(new SchemaIssue.Composite(node.ast, issues, input, rOptions))
-  return complete(node, input, out === undefined ? input : out)
-}
-
-function resumeStruct(frame: Frame<StructPayload, Struct, Struct | undefined>): Step {
-  const node = frame.node
-  const i = frame.i
-  const key = node.p.keys[i]
-  if (rStatus === OK) {
-    const value = rValue
-    if (value !== InternalParser.missing) {
-      if (frame.out !== undefined) InternalRecord.assignProperty(frame.out, key, value)
-    } else {
-      const child = properties(node.p)[i].ast
-      if (!child.context?.isOptional) {
-        const terminal = missingKey(frame, key, child)
-        if (terminal !== undefined) return terminal
-      }
-    }
-  } else {
-    const terminal = keyFailure(frame, key)
-    if (terminal !== undefined) return terminal
-  }
-  frame.i = i + 1
-  return property(node, frame.input, i + 1)
-}
-
-const structFrame: FrameKind<StructPayload, Struct, Struct | undefined> = {
-  resume: resumeStruct,
   copy: copyStruct
 }
 
-const structGuardFrame: FrameKind<StructPayload, Struct, Struct | undefined> = {
-  resume: resumeStruct,
+const structGuardFrame: FrameKind<StructPayload, Struct, undefined> = {
+  resume(frame, result) {
+    const node = frame.node
+    const input = frame.input
+    const i = frame.i
+    const acc = frame.acc
+    const flags = frame.flags
+    pop()
+    return structGuardLoop(node, input, i, acc, result, 0, flags)
+  },
   copy: identity
 }
 
@@ -878,51 +964,11 @@ interface ArrayPayload {
 
 type Elements = ReadonlyArray<unknown>
 
-function enterArray(
-  node: Node<ArrayPayload>,
-  input: unknown,
-  frame: FrameKind<ArrayPayload, Elements, Array<unknown> | undefined>,
-  out: boolean
-): Step {
-  if (input === InternalParser.missing) return succeed(input)
-  push(frame, node, input, undefined, 0, 0, out ? CATCH | RESTART : CATCH | RESTART | GUARD)
-  if (!Array.isArray(input)) {
-    pop()
-    return invalidType(node, input)
-  }
-  const p = node.p
+function resolveElements(p: ArrayPayload): void {
   if (p.elements === undefined) {
     p.elements = p.arrays.elements.map(p.resolver.node)
     p.rest = p.arrays.rest.map(p.resolver.node)
   }
-  const len = input.length
-  const top = stack[sp - 1]
-  if (out) top.out = new Array(len)
-  top.j = len
-  return element(node, input, 0, len)
-}
-
-const arrayKind: Kind<ArrayPayload> = {
-  enter(node, input) {
-    return enterArray(node, input, arrayFrame, true)
-  },
-  guard(node, input) {
-    return node.checks === undefined && node.encodingChecks === undefined
-      ? enterArray(node, input, arrayGuardFrame, false)
-      : enterArray(node, input, arrayFrame, true)
-  }
-}
-
-function element(node: Node<ArrayPayload>, input: Elements, i: number, len: number): Step {
-  const arrays = node.p.arrays
-  const elementLen = arrays.elements.length
-  const restLen = arrays.rest.length
-  const end = restLen === 0 ? elementLen : Math.max(len, elementLen + Math.max(0, restLen - 1))
-  if (i >= end) return finishArray(node, input, len)
-  const item = input[i]
-  const child = elementAt(node.p, i, len)
-  const value = i < len ? item : InternalParser.missing
-  return stack[sp - 1].kind === arrayFrame ? enterChild(child, value) : guardChild(child, value)
 }
 
 function elementAt(p: ArrayPayload, i: number, len: number): Node<unknown> {
@@ -934,57 +980,179 @@ function elementAt(p: ArrayPayload, i: number, len: number): Node<unknown> {
   return i >= tailThreshold ? rest[i - tailThreshold + 1] : rest[0]
 }
 
-function finishArray(node: Node<ArrayPayload>, input: Elements, len: number): Signal {
-  const options = rOptions
-  const elementLen = node.p.arrays.elements.length
-  const frame = stack[sp - 1]
-  if (node.p.arrays.rest.length === 0 && len > elementLen) {
+function arrayEnd(arrays: SchemaAST.Arrays, len: number): number {
+  const elementLen = arrays.elements.length
+  const restLen = arrays.rest.length
+  return restLen === 0 ? elementLen : Math.max(len, elementLen + Math.max(0, restLen - 1))
+}
+
+function foldArray(node: Node<ArrayPayload>, input: unknown, depth: number): unknown {
+  if (input === InternalParser.missing) return input
+  if (depth >= LIMIT) return descend(node, input, DESCEND)
+  let len: number
+  try {
+    if (!Array.isArray(input)) return invalidType(node, input)
+    resolveElements(node.p)
+    len = input.length
+  } catch (error) {
+    return die(error)
+  }
+  return arrayLoop(node, input, new Array(len), 0, len, undefined, NONE, depth, CATCH | RESTART)
+}
+
+function guardArray(node: Node<ArrayPayload>, input: unknown, depth: number): unknown {
+  if (node.checks !== undefined || node.encodingChecks !== undefined) return foldArray(node, input, depth)
+  if (input === InternalParser.missing) return input
+  if (depth >= LIMIT) return descend(node, input, DESCEND_GUARD)
+  let len: number
+  try {
+    if (!Array.isArray(input)) return invalidType(node, input)
+    resolveElements(node.p)
+    len = input.length
+  } catch (error) {
+    return die(error)
+  }
+  return arrayGuardLoop(node, input, 0, len, undefined, NONE, depth, CATCH | RESTART | GUARD)
+}
+
+function arrayLoop(
+  node: Node<ArrayPayload>,
+  input: Elements,
+  out: Array<unknown>,
+  i: number,
+  len: number,
+  acc: Issues,
+  result: unknown,
+  depth: number,
+  flags: number
+): unknown {
+  const p = node.p
+  const end = arrayEnd(p.arrays, len)
+  try {
+    for (; i < end; i++) {
+      if (result === NONE) {
+        const item = input[i]
+        const child = elementAt(p, i, len)
+        result = child.kind.fold(child, i < len ? item : InternalParser.missing, depth + 1)
+      }
+      if (result === HALT) {
+        if (rStatus >= SUSPEND) return spill(arrayFrame, node, input, out, i, len, undefined, acc, flags)
+        const issue = keyIssue(node, input, i)
+        if (issue === HALT) return HALT
+        if (acc) acc.push(issue)
+        else acc = [issue]
+      } else if (result !== InternalParser.missing) {
+        out[i] = result
+      } else {
+        const child = elementAt(p, i, len).ast
+        if (!child.context?.isOptional) {
+          const issue = missingKey(node, input, i, child)
+          if (issue === HALT) return HALT
+          if (acc) acc.push(issue)
+          else acc = [issue]
+        }
+      }
+      result = NONE
+    }
+    const excess = excessElements(node, input, len, acc)
+    if (excess === HALT) return HALT
+    acc = excess
+  } catch (error) {
+    return die(error)
+  }
+  if (acc) return failIssue(new SchemaIssue.Composite(node.ast, acc, input, rOptions))
+  return finish(node, input, out)
+}
+
+function arrayGuardLoop(
+  node: Node<ArrayPayload>,
+  input: Elements,
+  i: number,
+  len: number,
+  acc: Issues,
+  result: unknown,
+  depth: number,
+  flags: number
+): unknown {
+  const p = node.p
+  const end = arrayEnd(p.arrays, len)
+  try {
+    for (; i < end; i++) {
+      if (result === NONE) {
+        const item = input[i]
+        const child = elementAt(p, i, len)
+        result = child.kind.guard(child, i < len ? item : InternalParser.missing, depth + 1)
+      }
+      if (result === HALT) {
+        if (rStatus >= SUSPEND) return spill(arrayGuardFrame, node, input, undefined, i, len, undefined, acc, flags)
+        const issue = keyIssue(node, input, i)
+        if (issue === HALT) return HALT
+        if (acc) acc.push(issue)
+        else acc = [issue]
+      } else if (result === InternalParser.missing) {
+        const child = elementAt(p, i, len).ast
+        if (!child.context?.isOptional) {
+          const issue = missingKey(node, input, i, child)
+          if (issue === HALT) return HALT
+          if (acc) acc.push(issue)
+          else acc = [issue]
+        }
+      }
+      result = NONE
+    }
+    const excess = excessElements(node, input, len, acc)
+    if (excess === HALT) return HALT
+    acc = excess
+  } catch (error) {
+    return die(error)
+  }
+  if (acc) return failIssue(new SchemaIssue.Composite(node.ast, acc, input, rOptions))
+  return input
+}
+
+function excessElements(node: Node<ArrayPayload>, input: Elements, len: number, acc: Issues): Issues | typeof HALT {
+  const arrays = node.p.arrays
+  const elementLen = arrays.elements.length
+  if (arrays.rest.length === 0 && len > elementLen) {
+    const options = rOptions
     for (let i = elementLen; i < len; i++) {
       const issue = new SchemaIssue.Pointer([i], new SchemaIssue.UnexpectedKey(node.ast, input[i], options))
-      if (options.errors !== "all") {
-        pop()
-        return failIssue(new SchemaIssue.Composite(node.ast, [issue], input, options))
-      }
-      add(frame, issue)
+      if (options.errors !== "all") return failIssue(new SchemaIssue.Composite(node.ast, [issue], input, options))
+      if (acc) acc.push(issue)
+      else acc = [issue]
     }
   }
-  const out = frame.out
-  const issues = frame.acc
-  pop()
-  if (issues) return failIssue(new SchemaIssue.Composite(node.ast, issues, input, options))
-  return complete(node, input, out === undefined ? input : out)
+  return acc
 }
 
-function resumeArray(frame: Frame<ArrayPayload, Elements, Array<unknown> | undefined>): Step {
-  const node = frame.node
-  const i = frame.i
-  const len = frame.j
-  if (rStatus === OK) {
-    const value = rValue
-    if (value !== InternalParser.missing) {
-      if (frame.out !== undefined) frame.out[i] = value
-    } else {
-      const child = elementAt(node.p, i, len).ast
-      if (!child.context?.isOptional) {
-        const terminal = missingKey(frame, i, child)
-        if (terminal !== undefined) return terminal
-      }
-    }
-  } else {
-    const terminal = keyFailure(frame, i)
-    if (terminal !== undefined) return terminal
-  }
-  frame.i = i + 1
-  return element(node, frame.input, i + 1, len)
+const arrayKind: Kind<ArrayPayload> = { fold: foldArray, guard: guardArray }
+
+const arrayFrame: FrameKind<ArrayPayload, Elements, Array<unknown>> = {
+  resume(frame, result) {
+    const node = frame.node
+    const input = frame.input
+    const out = frame.out
+    const i = frame.i
+    const len = frame.j
+    const acc = frame.acc
+    const flags = frame.flags
+    pop()
+    return arrayLoop(node, input, out, i, len, acc, result, 0, flags)
+  },
+  copy: (out) => out.slice()
 }
 
-const arrayFrame: FrameKind<ArrayPayload, Elements, Array<unknown> | undefined> = {
-  resume: resumeArray,
-  copy: (out) => out === undefined ? out : out.slice()
-}
-
-const arrayGuardFrame: FrameKind<ArrayPayload, Elements, Array<unknown> | undefined> = {
-  resume: resumeArray,
+const arrayGuardFrame: FrameKind<ArrayPayload, Elements, undefined> = {
+  resume(frame, result) {
+    const node = frame.node
+    const input = frame.input
+    const i = frame.i
+    const len = frame.j
+    const acc = frame.acc
+    const flags = frame.flags
+    pop()
+    return arrayGuardLoop(node, input, i, len, acc, result, 0, flags)
+  },
   copy: identity
 }
 
@@ -1001,95 +1169,155 @@ function member(p: UnionPayload, i: number): Node<unknown> {
   return p.members[i] ??= p.resolver.node(p.union.types[i])
 }
 
-function enterUnion(node: Node<UnionPayload>, input: unknown, child: typeof enterChild): Step {
-  if (input === InternalParser.missing) return succeed(input)
+function foldUnion(node: Node<UnionPayload>, input: unknown, depth: number): unknown {
+  if (input === InternalParser.missing) return input
+  if (depth >= LIMIT) return descend(node, input, DESCEND)
   const p = node.p
   const candidates = (p.index ??= p.candidates(p.union.types))(input, false)
-  if (candidates.length === 0) {
-    return failIssue(new SchemaIssue.AnyOf(node.p.union, [], input, rOptions))
-  }
+  if (candidates.length === 0) return failIssue(new SchemaIssue.AnyOf(p.union, [], input, rOptions))
   if (candidates.length === 1) {
-    push(unionSingleFrame, node, input, undefined, 0, 0, 0)
-    return child(member(p, candidates[0]), input)
+    const child = member(p, candidates[0])
+    return unionSingle(node, input, child.kind.fold(child, input, depth + 1))
   }
-  push(child === enterChild ? unionFrame : unionGuardFrame, node, input, candidates, 0, -1, 0)
-  return child(member(p, candidates[0]), input)
+  return unionLoop(node, input, candidates, 0, -1, undefined, undefined, NONE, depth)
 }
 
-const unionKind: Kind<UnionPayload> = {
-  enter(node, input) {
-    return enterUnion(node, input, enterChild)
-  },
-  guard(node, input) {
-    return node.checks === undefined && node.encodingChecks === undefined
-      ? enterUnion(node, input, guardChild)
-      : enterUnion(node, input, enterChild)
+function guardUnion(node: Node<UnionPayload>, input: unknown, depth: number): unknown {
+  if (node.checks !== undefined || node.encodingChecks !== undefined) return foldUnion(node, input, depth)
+  if (input === InternalParser.missing) return input
+  if (depth >= LIMIT) return descend(node, input, DESCEND_GUARD)
+  const p = node.p
+  const candidates = (p.index ??= p.candidates(p.union.types))(input, false)
+  if (candidates.length === 0) return failIssue(new SchemaIssue.AnyOf(p.union, [], input, rOptions))
+  if (candidates.length === 1) {
+    const child = member(p, candidates[0])
+    return unionSingle(node, input, child.kind.guard(child, input, depth + 1))
   }
+  return unionGuardLoop(node, input, candidates, 0, -1, undefined, undefined, NONE, depth)
 }
+
+function unionSingle(node: Node<UnionPayload>, input: unknown, result: unknown): unknown {
+  if (result !== HALT) return finish(node, input, result)
+  if (rStatus >= SUSPEND) return spill(unionSingleFrame, node, input, undefined, 0, 0, undefined, undefined, 0)
+  const issue = schemaIssue()
+  if (issue === undefined) return HALT
+  return failIssue(new SchemaIssue.AnyOf(node.p.union, [issue], input, rOptions))
+}
+
+function unionLoop(
+  node: Node<UnionPayload>,
+  input: unknown,
+  candidates: ReadonlyArray<number>,
+  i: number,
+  found: number,
+  value: unknown,
+  acc: Issues,
+  result: unknown,
+  depth: number
+): unknown {
+  const p = node.p
+  for (; i < candidates.length; i++) {
+    if (result === NONE) {
+      const child = member(p, candidates[i])
+      result = child.kind.fold(child, input, depth + 1)
+    }
+    if (result === HALT) {
+      if (rStatus >= SUSPEND) return spill(unionFrame, node, input, candidates, i, found, value, acc, 0)
+      const issue = schemaIssue()
+      if (issue === undefined) return HALT
+      if (acc) acc.push(issue)
+      else acc = [issue]
+    } else {
+      if (found >= 0) {
+        const types = p.union.types
+        return failIssue(new SchemaIssue.OneOf(p.union, [types[found], types[candidates[i]]], input, rOptions))
+      }
+      if (!p.oneOf) return finish(node, input, result)
+      value = result
+      found = candidates[i]
+    }
+    result = NONE
+  }
+  if (found >= 0) return finish(node, input, value)
+  return failIssue(new SchemaIssue.AnyOf(p.union, acc ?? [], input, rOptions))
+}
+
+function unionGuardLoop(
+  node: Node<UnionPayload>,
+  input: unknown,
+  candidates: ReadonlyArray<number>,
+  i: number,
+  found: number,
+  value: unknown,
+  acc: Issues,
+  result: unknown,
+  depth: number
+): unknown {
+  const p = node.p
+  for (; i < candidates.length; i++) {
+    if (result === NONE) {
+      const child = member(p, candidates[i])
+      result = child.kind.guard(child, input, depth + 1)
+    }
+    if (result === HALT) {
+      if (rStatus >= SUSPEND) return spill(unionGuardFrame, node, input, candidates, i, found, value, acc, 0)
+      const issue = schemaIssue()
+      if (issue === undefined) return HALT
+      if (acc) acc.push(issue)
+      else acc = [issue]
+    } else {
+      if (found >= 0) {
+        const types = p.union.types
+        return failIssue(new SchemaIssue.OneOf(p.union, [types[found], types[candidates[i]]], input, rOptions))
+      }
+      if (!p.oneOf) return finish(node, input, result)
+      value = result
+      found = candidates[i]
+    }
+    result = NONE
+  }
+  if (found >= 0) return finish(node, input, value)
+  return failIssue(new SchemaIssue.AnyOf(p.union, acc ?? [], input, rOptions))
+}
+
+const unionKind: Kind<UnionPayload> = { fold: foldUnion, guard: guardUnion }
 
 const unionSingleFrame: FrameKind<UnionPayload, unknown, undefined> = {
-  resume(frame) {
+  resume(frame, result) {
     const node = frame.node
     const input = frame.input
     pop()
-    if (rStatus === OK) return complete(node, input, rValue)
-    const issue = schemaIssue()
-    if (issue === undefined) return DONE
-    return failIssue(new SchemaIssue.AnyOf(node.p.union, [issue], input, rOptions))
+    return unionSingle(node, input, result)
   },
   copy: identity
 }
 
-function resumeUnion(frame: Frame<UnionPayload, unknown, ReadonlyArray<number>>, child: typeof enterChild): Step {
-  const node = frame.node
-  const input = frame.input
-  const options = rOptions
-  const candidates = frame.out
-  const position = candidates[frame.i]
-  if (rStatus === OK) {
-    if (frame.j >= 0) {
-      const types = node.p.union.types
-      const successes = [types[frame.j], types[position]]
-      pop()
-      return failIssue(new SchemaIssue.OneOf(node.p.union, successes, input, options))
-    }
-    if (!node.p.oneOf) {
-      pop()
-      return complete(node, input, rValue)
-    }
-    frame.value = rValue
-    frame.j = position
-  } else {
-    const issue = schemaIssue()
-    if (issue === undefined) {
-      pop()
-      return DONE
-    }
-    add(frame, issue)
-  }
-  const next = frame.i + 1
-  if (next < candidates.length) {
-    frame.i = next
-    return child(member(node.p, candidates[next]), input)
-  }
-  const found = frame.j >= 0
-  const value = frame.value
-  const issues = frame.acc
-  pop()
-  if (found) return complete(node, input, value)
-  return failIssue(new SchemaIssue.AnyOf(node.p.union, issues ?? [], input, options))
-}
-
 const unionFrame: FrameKind<UnionPayload, unknown, ReadonlyArray<number>> = {
-  resume(frame) {
-    return resumeUnion(frame, enterChild)
+  resume(frame, result) {
+    const node = frame.node
+    const input = frame.input
+    const candidates = frame.out
+    const i = frame.i
+    const found = frame.j
+    const value = frame.value
+    const acc = frame.acc
+    pop()
+    return unionLoop(node, input, candidates, i, found, value, acc, result, 0)
   },
   copy: identity
 }
 
 const unionGuardFrame: FrameKind<UnionPayload, unknown, ReadonlyArray<number>> = {
-  resume(frame) {
-    return resumeUnion(frame, guardChild)
+  resume(frame, result) {
+    const node = frame.node
+    const input = frame.input
+    const candidates = frame.out
+    const i = frame.i
+    const found = frame.j
+    const value = frame.value
+    const acc = frame.acc
+    pop()
+    return unionGuardLoop(node, input, candidates, i, found, value, acc, result, 0)
   },
   copy: identity
 }
@@ -1101,13 +1329,13 @@ interface SuspendPayload {
 }
 
 const suspendKind: Kind<SuspendPayload> = {
-  enter(node, input) {
+  fold(node, input) {
     const p = node.p
-    return enterChild(p.target ?? resolveTarget(p), input)
+    return descend(p.target ?? resolveTarget(p), input, DESCEND)
   },
   guard(node, input) {
     const p = node.p
-    return guardChild(p.target ?? resolveTarget(p), input)
+    return descend(p.target ?? resolveTarget(p), input, DESCEND_GUARD)
   }
 }
 
@@ -1126,8 +1354,8 @@ interface DeclarationPayload {
   run: ReturnType<SchemaAST.Declaration["run"]> | undefined
 }
 
-function enterDeclaration(node: Node<DeclarationPayload>, input: unknown): Step {
-  if (input === InternalParser.missing) return succeed(input)
+function foldDeclaration(node: Node<DeclarationPayload>, input: unknown): unknown {
+  if (input === InternalParser.missing) return input
   const p = node.p
   const run = p.run ?? resolveRun(p)
   const result = run(input, p.declaration, rOptions)
@@ -1146,28 +1374,34 @@ function resolveRun(p: DeclarationPayload): ReturnType<SchemaAST.Declaration["ru
   return p.run = run
 }
 
-const declarationKind: Kind<DeclarationPayload> = { enter: enterDeclaration, guard: enterDeclaration }
+const declarationKind: Kind<DeclarationPayload> = { fold: foldDeclaration, guard: foldDeclaration }
 
-function enterTemplate(node: Node<Node<unknown>>, input: unknown): Step {
-  if (input === InternalParser.missing) return succeed(input)
-  push(templateFrame, node, input, undefined, 0, 0, 0)
-  return enterChild(node.p, input)
+function foldTemplate(node: Node<Node<unknown>>, input: unknown, depth: number): unknown {
+  if (input === InternalParser.missing) return input
+  if (depth >= LIMIT) return descend(node, input, DESCEND)
+  const inner = node.p
+  return templateDone(node, input, inner.kind.fold(inner, input, depth + 1))
 }
 
-const templateKind: Kind<Node<unknown>> = { enter: enterTemplate, guard: enterTemplate }
+function templateDone(node: Node<Node<unknown>>, input: unknown, result: unknown): unknown {
+  if (result !== HALT) return complete(node, input, input)
+  if (rStatus >= SUSPEND) return spill(templateFrame, node, input, undefined, 0, 0, undefined, undefined, 0)
+  if (rStatus === ISSUE && rIssue !== undefined) {
+    return failIssue(new SchemaIssue.Composite(node.ast, [rIssue], input, rOptions))
+  }
+  const error = findError(rCause)
+  if (error._tag === "Failure") return HALT
+  return failIssue(new SchemaIssue.Composite(node.ast, [error.success], input, rOptions))
+}
+
+const templateKind: Kind<Node<unknown>> = { fold: foldTemplate, guard: foldTemplate }
 
 const templateFrame: FrameKind<Node<unknown>, unknown, undefined> = {
-  resume(frame) {
+  resume(frame, result) {
     const node = frame.node
     const input = frame.input
     pop()
-    if (rStatus === OK) return complete(node, input, input)
-    if (rStatus === ISSUE && rIssue !== undefined) {
-      return failIssue(new SchemaIssue.Composite(node.ast, [rIssue], input, rOptions))
-    }
-    const error = findError(rCause)
-    if (error._tag === "Failure") return DONE
-    return failIssue(new SchemaIssue.Composite(node.ast, [error.success], input, rOptions))
+    return templateDone(node, input, result)
   },
   copy: identity
 }
@@ -1191,67 +1425,82 @@ function resolveLinkParsers(p: LinkPayload): ReadonlyArray<Node<unknown>> {
   return p.parsers = p.links.map((link) => resolver.node(link.to))
 }
 
-function enterLink(node: Node<LinkPayload>, input: unknown): Step {
+function foldLink(node: Node<LinkPayload>, input: unknown, depth: number): unknown {
+  if (depth >= LIMIT) return descend(node, input, DESCEND)
   const parsers = linkParsers(node.p)
   const last = parsers.length - 1
-  push(linkParseFrame, node, input, undefined, last, 0, 0)
-  return enterChild(parsers[last], input)
+  const child = parsers[last]
+  return linkParsed(node, input, last, child.kind.fold(child, input, depth + 1), depth)
 }
 
-const linkKind: Kind<LinkPayload> = { enter: enterLink, guard: enterLink }
+function linkParsed(node: Node<LinkPayload>, input: unknown, i: number, result: unknown, depth: number): unknown {
+  if (spilled(result)) return spill(linkParseFrame, node, input, undefined, i, 0, undefined, undefined, 0)
+  return linkTransform(node, input, i, result, depth)
+}
 
-function transformAt(frame: Frame<LinkPayload, unknown, undefined>, i: number): Step {
-  if (rStatus !== OK) return afterStep(frame, i)
-  const getter = frame.node.p.steps[i]
-  const value = rValue
+function linkTransform(node: Node<LinkPayload>, input: unknown, i: number, result: unknown, depth: number): unknown {
+  if (result === HALT) return linkAfter(node, input, i, result, depth)
+  const getter = node.p.steps[i]
   switch (getter._tag) {
     case "Passthrough":
-      return afterStep(frame, i)
+      return linkAfter(node, input, i, result, depth)
     case "Transform":
-      if (value !== InternalParser.missing) succeed(getter.transform(value))
-      return afterStep(frame, i)
+      return linkAfter(
+        node,
+        input,
+        i,
+        result === InternalParser.missing ? result : getter.transform(result),
+        depth
+      )
     case "TransformOptional":
-      deliver(InternalParser.fromOptionExit(getter.transform(InternalParser.toOption(value))), value)
-      return afterStep(frame, i)
+      return linkAfter(
+        node,
+        input,
+        i,
+        deliver(InternalParser.fromOptionExit(getter.transform(InternalParser.toOption(result))), result),
+        depth
+      )
     case "TransformEffect": {
-      if (value === InternalParser.missing) return afterStep(frame, i)
-      const effect = getter.transform(value, rOptions)
-      if (effectIsExit(effect)) {
-        deliver(effect, value)
-        return afterStep(frame, i)
-      }
-      frame.kind = linkEffectFrame
+      if (result === InternalParser.missing) return linkAfter(node, input, i, result, depth)
+      const effect = getter.transform(result, rOptions)
+      if (effectIsExit(effect)) return linkAfter(node, input, i, deliver(effect, result), depth)
+      spill(linkEffectFrame, node, input, undefined, i, 0, undefined, undefined, 0)
       return suspendOn(effect)
     }
     case "TransformOptionalEffect": {
-      const effect = getter.transform(InternalParser.toOption(value), rOptions)
+      const effect = getter.transform(InternalParser.toOption(result), rOptions)
       if (effectIsExit(effect)) {
-        if (effect._tag === "Failure") failCause(effect.cause)
-        else deliver(InternalParser.fromOptionExit(effect.value), value)
-        return afterStep(frame, i)
+        return linkAfter(
+          node,
+          input,
+          i,
+          effect._tag === "Failure"
+            ? failCause(effect.cause)
+            : deliver(InternalParser.fromOptionExit(effect.value), result),
+          depth
+        )
       }
-      frame.kind = linkEffectFrame
+      spill(linkEffectFrame, node, input, undefined, i, 0, undefined, undefined, 0)
       return suspendOn(flatMap(effect, InternalParser.fromOptionExit))
     }
   }
 }
 
-function afterStep(frame: Frame<LinkPayload, unknown, undefined>, i: number): Step {
-  const node = frame.node
+function linkAfter(node: Node<LinkPayload>, input: unknown, i: number, result: unknown, depth: number): unknown {
   if (i !== 0) {
-    frame.i = i - 1
-    if (rStatus === OK) {
-      frame.kind = linkParseFrame
-      return enterChild(linkParsers(node.p)[i - 1], rValue)
-    }
-    return transformAt(frame, i - 1)
+    if (result === HALT) return linkAfter(node, input, i - 1, result, depth)
+    const child = linkParsers(node.p)[i - 1]
+    return linkParsed(node, input, i - 1, child.kind.fold(child, result, depth + 1), depth)
   }
-  if (rStatus === OK) {
-    frame.kind = linkLocalFrame
-    return enterChild(node.p.local, rValue)
+  if (result !== HALT) {
+    const local = node.p.local
+    const value = local.kind.fold(local, result, depth + 1)
+    if (spilled(value)) return spill(linkLocalFrame, node, input, undefined, 0, 0, undefined, undefined, 0)
+    return value
   }
-  frame.kind = linkWrapFrame
-  return suspendOn(wrapEncoding(failureExit(), node.ast, frame.input, rOptions))
+  const failure = failureExit()
+  spill(linkWrapFrame, node, input, undefined, 0, 0, undefined, undefined, 0)
+  return suspendOn(wrapEncoding(failure, node.ast, input, rOptions))
 }
 
 function wrapEncoding(
@@ -1266,32 +1515,42 @@ function wrapEncoding(
   )
 }
 
+const linkKind: Kind<LinkPayload> = { fold: foldLink, guard: foldLink }
+
 const linkParseFrame: FrameKind<LinkPayload, unknown, undefined> = {
-  resume(frame) {
-    return transformAt(frame, frame.i)
+  resume(frame, result) {
+    const node = frame.node
+    const input = frame.input
+    const i = frame.i
+    pop()
+    return linkTransform(node, input, i, result, 0)
   },
   copy: identity
 }
 
 const linkEffectFrame: FrameKind<LinkPayload, unknown, undefined> = {
-  resume(frame) {
-    return afterStep(frame, frame.i)
+  resume(frame, result) {
+    const node = frame.node
+    const input = frame.input
+    const i = frame.i
+    pop()
+    return linkAfter(node, input, i, result, 0)
   },
   copy: identity
 }
 
 const linkLocalFrame: FrameKind<LinkPayload, unknown, undefined> = {
-  resume() {
+  resume(_, result) {
     pop()
-    return DONE
+    return result
   },
   copy: identity
 }
 
 const linkWrapFrame: FrameKind<LinkPayload, unknown, undefined> = {
-  resume() {
+  resume(_, result) {
     pop()
-    return DONE
+    return result
   },
   copy: identity
 }
