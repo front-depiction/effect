@@ -32,7 +32,7 @@ type Issues = Arr.NonEmptyArray<Issue> | undefined
 
 const NONE = Symbol()
 
-const LIMIT = 256
+const LIMIT = 640
 
 const ISSUE = 1
 const CAUSE = 2
