@@ -95,6 +95,8 @@ class Frame<P, I, O> {
   value: unknown
   acc: Issues
   flags: number
+  keys: ReadonlyArray<PropertyKey> | undefined
+  lists: ReadonlyArray<ReadonlyArray<PropertyKey>> | undefined
   constructor(
     kind: FrameKind<P, I, O>,
     node: Node<P>,
@@ -115,6 +117,8 @@ class Frame<P, I, O> {
     this.value = value
     this.acc = acc
     this.flags = flags
+    this.keys = undefined
+    this.lists = undefined
   }
 }
 
@@ -158,6 +162,8 @@ function pop(): void {
   frame.out = undefined
   frame.value = undefined
   frame.acc = undefined
+  frame.keys = undefined
+  frame.lists = undefined
 }
 
 function popTo(base: number): void {
@@ -391,19 +397,20 @@ function snapshot(base: number, options: SchemaAST.ParseOptions): Snapshot {
   for (let k = base; k < sp; k++) {
     const frame = stack[k]
     if (restart < 0 && frame.flags & RESTART) restart = k - base
-    frames.push(
-      new Frame(
-        frame.kind,
-        frame.node,
-        frame.input,
-        frame.out,
-        frame.i,
-        frame.j,
-        frame.value,
-        frame.acc,
-        frame.flags | CATCH
-      )
+    const copy = new Frame(
+      frame.kind,
+      frame.node,
+      frame.input,
+      frame.out,
+      frame.i,
+      frame.j,
+      frame.value,
+      frame.acc,
+      frame.flags | CATCH
     )
+    copy.keys = frame.keys
+    copy.lists = frame.lists
+    frames.push(copy)
   }
   popTo(base)
   return { frames, restart, options, pending: rPending }
@@ -423,6 +430,9 @@ function restore(frames: ReadonlyArray<AnyFrame>, end: number): void {
       frame.acc ? [frame.acc[0], ...frame.acc.slice(1)] : undefined,
       frame.flags
     )
+    const top = stack[sp - 1]
+    top.keys = frame.keys
+    top.lists = frame.lists
   }
 }
 
@@ -640,7 +650,6 @@ const foreignKind: Kind<ForeignPayload> = { fold: foldForeign, guard: foldForeig
 /** @internal */
 export interface Resolver {
   readonly node: (ast: SchemaAST.AST) => Node<unknown>
-  readonly local: (ast: SchemaAST.AST) => Parser
   readonly whole: (ast: SchemaAST.AST) => Parser
 }
 
@@ -697,7 +706,6 @@ export const enumNode = (ast: SchemaAST.Enum): Node<unknown> =>
 
 /** @internal */
 export function objectsNode(ast: SchemaAST.Objects, resolver: Resolver): Node<unknown> {
-  if (ast.indexSignatures.length > 0) return foreign(ast, () => resolver.local(ast))
   if (ast.propertySignatures.length === 0) return node(notNullishKind, ast, undefined)
   return new Node(structKind, ast, ast.checks, ast.encodingChecks, {
     objects: ast,
@@ -953,6 +961,245 @@ const structGuardFrame: FrameKind<StructPayload, Struct, undefined> = {
     return structGuardLoop(node, input, i, acc, result, 0, flags)
   },
   copy: identity
+}
+
+/** @internal */
+export interface RecordSupport {
+  readonly key: (parameter: SchemaAST.AST) => SchemaAST.AST
+  readonly keys: (
+    input: { readonly [x: PropertyKey]: unknown },
+    parameter: SchemaAST.IndexSignature["parameter"],
+    options: SchemaAST.ParseOptions
+  ) => ReadonlyArray<PropertyKey>
+  readonly string: SchemaAST.AST
+}
+
+interface IndexPlan {
+  readonly parameter: SchemaAST.IndexSignature["parameter"]
+  readonly key: Node<unknown> | undefined
+  readonly value: Node<unknown>
+}
+
+interface RecordPayload {
+  readonly objects: SchemaAST.Objects
+  readonly resolver: Resolver
+  readonly support: RecordSupport
+  readonly keys: ReadonlyArray<PropertyKey>
+  readonly expected: ReadonlySet<PropertyKey>
+  children: ReadonlyArray<Node<unknown>> | undefined
+  indexes: ReadonlyArray<IndexPlan> | undefined
+}
+
+/** @internal */
+export function recordNode(ast: SchemaAST.Objects, resolver: Resolver, support: RecordSupport): Node<unknown> {
+  return new Node(recordKind, ast, ast.checks, ast.encodingChecks, {
+    objects: ast,
+    resolver,
+    support,
+    keys: ast.propertySignatures.map((ps) => ps.name),
+    expected: new Set(ast.propertySignatures.map((ps) => typeof ps.name === "number" ? String(ps.name) : ps.name)),
+    children: undefined,
+    indexes: undefined
+  })
+}
+
+function resolveRecord(p: RecordPayload): ReadonlyArray<IndexPlan> {
+  if (p.indexes !== undefined) return p.indexes
+  const resolver = p.resolver
+  p.children = p.objects.propertySignatures.map((ps) => resolver.node(ps.type))
+  return p.indexes = p.objects.indexSignatures.map((is) => ({
+    parameter: is.parameter,
+    key: is.parameter === p.support.string ? undefined : resolver.node(p.support.key(is.parameter)),
+    value: resolver.node(is.type)
+  }))
+}
+
+function foldRecord(node: Node<RecordPayload>, input: unknown, depth: number): unknown {
+  if (input === InternalParser.missing) return input
+  if (depth >= LIMIT) return descend(node, input, DESCEND)
+  const p = node.p
+  let acc: Issues
+  let lists: ReadonlyArray<ReadonlyArray<PropertyKey>> | undefined
+  try {
+    if (!isStruct(input)) return invalidType(node, input)
+    const indexes = resolveRecord(p)
+    const options = rOptions
+    if (options.onExcessProperty === "error") {
+      lists = indexes.map((index) => p.support.keys(input, index.parameter, options))
+      const covered = new Set(p.expected)
+      for (const keys of lists) {
+        for (const key of keys) covered.add(key)
+      }
+      const keys = Reflect.ownKeys(input)
+      for (let i = 0; i < keys.length; i++) {
+        const key = keys[i]
+        if (!covered.has(key) && Object.prototype.propertyIsEnumerable.call(input, key)) {
+          const issue = new SchemaIssue.Pointer([key], new SchemaIssue.UnexpectedKey(node.ast, input[key], options))
+          if (options.errors !== "all") return failIssue(new SchemaIssue.Composite(node.ast, [issue], input, options))
+          if (acc) acc.push(issue)
+          else acc = [issue]
+        }
+      }
+    }
+  } catch (error) {
+    return die(error)
+  }
+  return recordLoop(node, input, {}, 0, 0, undefined, lists, NONE, acc, NONE, depth)
+}
+
+function recordLoop(
+  node: Node<RecordPayload>,
+  input: Struct,
+  out: Struct,
+  i: number,
+  j: number,
+  keys: ReadonlyArray<PropertyKey> | undefined,
+  lists: ReadonlyArray<ReadonlyArray<PropertyKey>> | undefined,
+  k2: unknown,
+  acc: Issues,
+  result: unknown,
+  depth: number
+): unknown {
+  const p = node.p
+  const names = p.keys
+  const children = p.children ?? []
+  const indexes = p.indexes ?? []
+  const n = names.length
+  try {
+    for (; i < n; i++) {
+      const key = names[i]
+      if (result === NONE) {
+        const child = children[i]
+        result = child.kind.fold(child, propertyValue(input, key), depth + 1)
+      }
+      if (result === HALT) {
+        if (rStatus >= SUSPEND) return spillRecord(recordFrame, node, input, out, i, j, keys, lists, k2, acc)
+        const issue = keyIssue(node, input, key)
+        if (issue === HALT) return HALT
+        if (acc) acc.push(issue)
+        else acc = [issue]
+      } else if (result !== InternalParser.missing) {
+        InternalRecord.assignProperty(out, key, result)
+      } else if (!children[i].ast.context?.isOptional) {
+        const issue = missingKey(node, input, key, children[i].ast)
+        if (issue === HALT) return HALT
+        if (acc) acc.push(issue)
+        else acc = [issue]
+      }
+      result = NONE
+    }
+    for (; i - n < indexes.length; i++, j = 0, keys = undefined) {
+      const index = indexes[i - n]
+      if (keys === undefined) {
+        keys = lists !== undefined
+          ? lists[i - n]
+          : index.key === undefined
+          ? Object.keys(input)
+          : p.support.keys(input, index.parameter, rOptions)
+      }
+      for (; j < keys.length; j++, k2 = NONE) {
+        const key = keys[j]
+        if (k2 === NONE) {
+          const parser = index.key
+          if (parser === undefined) {
+            k2 = key
+          } else {
+            if (result === NONE) result = parser.kind.fold(parser, key, depth + 1)
+            if (result === HALT) {
+              if (rStatus >= SUSPEND) return spillRecord(recordKeyFrame, node, input, out, i, j, keys, lists, k2, acc)
+              const issue = keyIssue(node, input, key)
+              if (issue === HALT) return HALT
+              if (acc) acc.push(issue)
+              else acc = [issue]
+              result = NONE
+              continue
+            }
+            k2 = result
+            result = NONE
+          }
+        }
+        if (result === NONE) {
+          const value = index.value
+          result = value.kind.fold(value, input[key], depth + 1)
+        }
+        if (result === HALT) {
+          if (rStatus >= SUSPEND) return spillRecord(recordFrame, node, input, out, i, j, keys, lists, k2, acc)
+          const issue = keyIssue(node, input, key)
+          if (issue === HALT) return HALT
+          if (acc) acc.push(issue)
+          else acc = [issue]
+        } else if (k2 !== InternalParser.missing && result !== InternalParser.missing) {
+          const name = propertyKey(k2)
+          if (!(n > 0 && (p.expected.has(key) || p.expected.has(typeof name === "number" ? String(name) : name)))) {
+            InternalRecord.assignProperty(out, name, result)
+          }
+        }
+        result = NONE
+      }
+    }
+  } catch (error) {
+    return die(error)
+  }
+  if (acc) return failIssue(new SchemaIssue.Composite(node.ast, acc, input, rOptions))
+  return finish(node, input, out)
+}
+
+function propertyKey(key: unknown): PropertyKey {
+  return typeof key === "string" || typeof key === "number" || typeof key === "symbol" ? key : String(key)
+}
+
+function spillRecord(
+  kind: FrameKind<RecordPayload, Struct, Struct>,
+  node: Node<RecordPayload>,
+  input: Struct,
+  out: Struct,
+  i: number,
+  j: number,
+  keys: ReadonlyArray<PropertyKey> | undefined,
+  lists: ReadonlyArray<ReadonlyArray<PropertyKey>> | undefined,
+  k2: unknown,
+  acc: Issues
+): typeof HALT {
+  spill(kind, node, input, out, i, j, k2, acc, CATCH | RESTART)
+  const top = stack[sp - 1]
+  top.keys = keys
+  top.lists = lists
+  return HALT
+}
+
+const recordKind: Kind<RecordPayload> = { fold: foldRecord, guard: foldRecord }
+
+const recordFrame: FrameKind<RecordPayload, Struct, Struct> = {
+  resume(frame, result) {
+    const node = frame.node
+    const input = frame.input
+    const out = frame.out
+    const i = frame.i
+    const j = frame.j
+    const keys = frame.keys
+    const lists = frame.lists
+    const k2 = frame.value
+    const acc = frame.acc
+    pop()
+    return recordLoop(node, input, out, i, j, keys, lists, k2, acc, result, 0)
+  },
+  copy: copyStruct
+}
+
+const recordKeyFrame: FrameKind<RecordPayload, Struct, Struct> = {
+  resume(frame, result) {
+    const node = frame.node
+    const input = frame.input
+    const out = frame.out
+    const i = frame.i
+    const j = frame.j
+    const keys = frame.keys
+    const lists = frame.lists
+    const acc = frame.acc
+    pop()
+    return recordLoop(node, input, out, i, j, keys, lists, NONE, acc, result, 0)
+  },
+  copy: copyStruct
 }
 
 interface ArrayPayload {

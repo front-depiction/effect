@@ -2874,7 +2874,9 @@ export const Objects: new(
   }
   /** @internal */
   override getNode(resolver: Machine.Resolver): Machine.Node<unknown> {
-    return Machine.objectsNode(this, resolver)
+    return this.indexSignatures.length > 0
+      ? Machine.recordNode(this, resolver, recordSupport)
+      : Machine.objectsNode(this, resolver)
   }
   /** @internal */
   getParser(
@@ -4882,6 +4884,12 @@ export const parameterFromPropertyKey = applyToSelfOrLastLinkEncodingIdempotent(
       return ast.recur(parameterFromPropertyKey)
   }
 })
+
+const recordSupport: Machine.RecordSupport = {
+  key: parameterFromPropertyKey,
+  keys: getIndexSignatureKeys,
+  string
+}
 
 /** @internal */
 export const parameterFromString = applyToSelfOrLastLinkEncodingIdempotent((ast) => {

@@ -178,11 +178,6 @@ export function compile(
   }
 }
 
-/** @internal */
-export function compileLocal(ast: SchemaAST.AST, compile: Compiler): Parser {
-  return withChecks(ast, ast.getParser(compile))
-}
-
 function encodingChecksOf(ast: SchemaAST.AST): SchemaAST.Checks | undefined {
   switch (ast._tag) {
     case "Declaration":
