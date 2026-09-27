@@ -38,18 +38,15 @@ const ISSUE = 1
 const CAUSE = 2
 const SUSPEND = 3
 const DESCEND = 4
-const DESCEND_GUARD = 5
 
 const CATCH = 1
 const RESTART = 2
-const GUARD = 4
 
 const idle: Pending = exitSucceed(undefined)
 const unplanned = Symbol()
 
 interface Kind<P> {
   fold(run: Run, node: Node<P>, input: unknown, depth: number): unknown
-  guard(run: Run, node: Node<P>, input: unknown, depth: number): unknown
 }
 
 /** @internal */
@@ -119,7 +116,7 @@ class Frame<P, I, O> {
 type AnyFrame = Frame<unknown, unknown, unknown>
 
 class Run {
-  status: typeof ISSUE | typeof CAUSE | typeof SUSPEND | typeof DESCEND | typeof DESCEND_GUARD = ISSUE
+  status: typeof ISSUE | typeof CAUSE | typeof SUSPEND | typeof DESCEND = ISSUE
   issue: Issue | undefined = undefined
   cause: Cause.Cause<Issue> = causeEmpty
   next: Node<unknown> | undefined = undefined
@@ -219,10 +216,10 @@ function suspendOn(run: Run, pending: Pending): Run {
   return run
 }
 
-function descend(run: Run, node: Node<unknown>, input: unknown, status: typeof DESCEND | typeof DESCEND_GUARD): Run {
+function descend(run: Run, node: Node<unknown>, input: unknown): Run {
   run.next = node
   run.nextInput = input
-  run.status = status
+  run.status = DESCEND
   return run
 }
 
@@ -326,7 +323,7 @@ function drain(run: Run, base: number, segment: number, result: unknown): unknow
       const input = run.nextInput
       run.next = undefined
       run.nextInput = undefined
-      result = run.status === DESCEND ? next.kind.fold(run, next, input, 0) : next.kind.guard(run, next, input, 0)
+      result = next.kind.fold(run, next, input, 0)
     } else if (run.sp === base) {
       return result
     } else {
@@ -393,22 +390,6 @@ function start(
     result = unwind(run, base, error, previous, root)
   }
   return result === run ? drive(run, base, base, result, previous, root) : result
-}
-
-function startGuard(
-  run: Run,
-  node: Node<unknown>,
-  input: unknown,
-  base: number,
-  previous: SchemaAST.ParseOptions
-): unknown {
-  let result: unknown
-  try {
-    result = node.kind.guard(run, node, input, 0)
-  } catch (error) {
-    result = unwind(run, base, error, previous, true)
-  }
-  return result === run ? drive(run, base, base, result, previous, true) : result
 }
 
 interface Snapshot {
@@ -509,9 +490,7 @@ function restart(k: Snapshot): Pending {
   const node = frame.node
   let result: unknown
   try {
-    result = frame.flags & GUARD
-      ? node.kind.guard(run, node, frame.input, 0)
-      : node.kind.fold(run, node, frame.input, 0)
+    result = node.kind.fold(run, node, frame.input, 0)
   } catch (error) {
     result = unwind(run, base, error, previous, false)
   }
@@ -547,17 +526,7 @@ export function decode(
 
 /** @internal */
 export function guard(node: Node<unknown>, input: unknown, options: SchemaAST.ParseOptions): Pending {
-  const run = machine
-  run.planFailure = unplanned
-  const previous = run.options
-  run.options = options
-  const base = run.sp
-  const value = startGuard(run, node, input, base, previous)
-  run.options = previous
-  if (value !== run) {
-    return value === input && input !== InternalParser.missing ? InternalParser.sameExit : exitSucceed(value)
-  }
-  return release(run, settle(run, base, value, options))
+  return decode(guardOf(node), input, options, true)
 }
 
 const identity = <O>(out: O): O => out
@@ -582,35 +551,35 @@ function foldString(run: Run, node: Node<undefined>, input: unknown): unknown {
   return typeof input === "string" ? done(run, node, input) : invalidType(run, node, input)
 }
 
-const stringKind: Kind<undefined> = { fold: foldString, guard: foldString }
+const stringKind: Kind<undefined> = { fold: foldString }
 
 function foldNumber(run: Run, node: Node<undefined>, input: unknown): unknown {
   if (input === InternalParser.missing) return input
   return typeof input === "number" ? done(run, node, input) : invalidType(run, node, input)
 }
 
-const numberKind: Kind<undefined> = { fold: foldNumber, guard: foldNumber }
+const numberKind: Kind<undefined> = { fold: foldNumber }
 
 function foldBoolean(run: Run, node: Node<undefined>, input: unknown): unknown {
   if (input === InternalParser.missing) return input
   return typeof input === "boolean" ? done(run, node, input) : invalidType(run, node, input)
 }
 
-const booleanKind: Kind<undefined> = { fold: foldBoolean, guard: foldBoolean }
+const booleanKind: Kind<undefined> = { fold: foldBoolean }
 
 function foldBigInt(run: Run, node: Node<undefined>, input: unknown): unknown {
   if (input === InternalParser.missing) return input
   return typeof input === "bigint" ? done(run, node, input) : invalidType(run, node, input)
 }
 
-const bigintKind: Kind<undefined> = { fold: foldBigInt, guard: foldBigInt }
+const bigintKind: Kind<undefined> = { fold: foldBigInt }
 
 function foldSymbol(run: Run, node: Node<undefined>, input: unknown): unknown {
   if (input === InternalParser.missing) return input
   return typeof input === "symbol" ? done(run, node, input) : invalidType(run, node, input)
 }
 
-const symbolKind: Kind<undefined> = { fold: foldSymbol, guard: foldSymbol }
+const symbolKind: Kind<undefined> = { fold: foldSymbol }
 
 function foldObjectKeyword(run: Run, node: Node<undefined>, input: unknown): unknown {
   if (input === InternalParser.missing) return input
@@ -619,28 +588,28 @@ function foldObjectKeyword(run: Run, node: Node<undefined>, input: unknown): unk
     : invalidType(run, node, input)
 }
 
-const objectKeywordKind: Kind<undefined> = { fold: foldObjectKeyword, guard: foldObjectKeyword }
+const objectKeywordKind: Kind<undefined> = { fold: foldObjectKeyword }
 
 function foldNotNullish(run: Run, node: Node<undefined>, input: unknown): unknown {
   if (input === InternalParser.missing) return input
   return input != null ? done(run, node, input) : invalidType(run, node, input)
 }
 
-const notNullishKind: Kind<undefined> = { fold: foldNotNullish, guard: foldNotNullish }
+const notNullishKind: Kind<undefined> = { fold: foldNotNullish }
 
 function foldAny(run: Run, node: Node<undefined>, input: unknown): unknown {
   if (input === InternalParser.missing) return input
   return done(run, node, input)
 }
 
-const anyKind: Kind<undefined> = { fold: foldAny, guard: foldAny }
+const anyKind: Kind<undefined> = { fold: foldAny }
 
 function foldNever(run: Run, node: Node<undefined>, input: unknown): unknown {
   if (input === InternalParser.missing) return input
   return invalidType(run, node, input)
 }
 
-const neverKind: Kind<undefined> = { fold: foldNever, guard: foldNever }
+const neverKind: Kind<undefined> = { fold: foldNever }
 
 function foldConst(run: Run, node: Node<unknown>, input: unknown): unknown {
   if (input === InternalParser.missing) return input
@@ -649,21 +618,21 @@ function foldConst(run: Run, node: Node<unknown>, input: unknown): unknown {
   return value === 0 ? done(run, node, input) : node.checks === undefined ? value : complete(run, node, input, value)
 }
 
-const constKind: Kind<unknown> = { fold: foldConst, guard: foldConst }
+const constKind: Kind<unknown> = { fold: foldConst }
 
 function foldVoid(run: Run, node: Node<undefined>, input: unknown): unknown {
   if (input === InternalParser.missing) return input
   return node.checks === undefined ? undefined : complete(run, node, input, undefined)
 }
 
-const voidKind: Kind<undefined> = { fold: foldVoid, guard: foldVoid }
+const voidKind: Kind<undefined> = { fold: foldVoid }
 
 function foldEnum(run: Run, node: Node<ReadonlySet<unknown>>, input: unknown): unknown {
   if (input === InternalParser.missing) return input
   return node.p.has(input) ? done(run, node, input) : invalidType(run, node, input)
 }
 
-const enumKind: Kind<ReadonlySet<unknown>> = { fold: foldEnum, guard: foldEnum }
+const enumKind: Kind<ReadonlySet<unknown>> = { fold: foldEnum }
 
 interface ForeignPayload {
   readonly get: () => Parser
@@ -683,7 +652,7 @@ function foldForeign(run: Run, node: Node<ForeignPayload>, input: unknown, depth
   return value === run ? run : complete(run, node, input, value)
 }
 
-const foreignKind: Kind<ForeignPayload> = { fold: foldForeign, guard: foldForeign }
+const foreignKind: Kind<ForeignPayload> = { fold: foldForeign }
 
 /** @internal */
 export interface Resolver {
@@ -893,30 +862,52 @@ function propertyValue(input: Struct, key: PropertyKey): unknown {
 
 function foldStruct(run: Run, node: Node<StructPayload>, input: unknown, depth: number): unknown {
   if (input === InternalParser.missing) return input
-  if (depth >= LIMIT) return descend(run, node, input, DESCEND)
+  if (depth >= LIMIT) return descend(run, node, input)
   const options = run.options
   if (options.errors !== "all" && options.onExcessProperty === undefined && sequential(options)) {
     if (!isStruct(input)) return invalidType(run, node, input)
     properties(node.p)
     return structLoop(run, node, input, {}, 0, undefined, NONE, depth, CATCH)
   }
-  return structAccumulate(run, node, input, depth, false)
+  return structAccumulate(run, node, input, depth)
 }
 
 function guardStruct(run: Run, node: Node<StructPayload>, input: unknown, depth: number): unknown {
-  if (node.checks !== undefined || node.encodingChecks !== undefined) return foldStruct(run, node, input, depth)
   if (input === InternalParser.missing) return input
-  if (depth >= LIMIT) return descend(run, node, input, DESCEND_GUARD)
+  if (depth >= LIMIT) return descend(run, node, input)
   const options = run.options
   if (options.errors !== "all" && options.onExcessProperty === undefined && sequential(options)) {
     if (!isStruct(input)) return invalidType(run, node, input)
     properties(node.p)
-    return structGuardLoop(run, node, input, 0, undefined, NONE, depth, CATCH | GUARD)
+    return structGuardLoop(run, node, input, 0, undefined, NONE, depth, CATCH)
   }
-  return structAccumulate(run, node, input, depth, true)
+  let acc: Issues
+  try {
+    if (!isStruct(input)) return invalidType(run, node, input)
+    properties(node.p)
+    if (options.onExcessProperty === "error") {
+      const expected = node.p.expected
+      const keys = Reflect.ownKeys(input)
+      for (let i = 0; i < keys.length; i++) {
+        const key = keys[i]
+        if (!expected.has(key) && Object.prototype.propertyIsEnumerable.call(input, key)) {
+          const issue = new SchemaIssue.Pointer([key], new SchemaIssue.UnexpectedKey(node.ast, input[key], options))
+          if (options.errors !== "all") {
+            return failIssue(run, new SchemaIssue.Composite(node.ast, [issue], input, options))
+          }
+          if (acc) acc.push(issue)
+          else acc = [issue]
+        }
+      }
+    }
+  } catch (error) {
+    return die(run, error)
+  }
+  if (!sequential(options)) return forkStruct(run, node, input, acc)
+  return structGuardLoop(run, node, input, 0, acc, NONE, depth, CATCH | RESTART)
 }
 
-function structAccumulate(run: Run, node: Node<StructPayload>, input: unknown, depth: number, guard: boolean): unknown {
+function structAccumulate(run: Run, node: Node<StructPayload>, input: unknown, depth: number): unknown {
   let acc: Issues
   try {
     if (!isStruct(input)) return invalidType(run, node, input)
@@ -941,9 +932,7 @@ function structAccumulate(run: Run, node: Node<StructPayload>, input: unknown, d
     return die(run, error)
   }
   if (!sequential(run.options)) return forkStruct(run, node, input, acc)
-  return guard
-    ? structGuardLoop(run, node, input, 0, acc, NONE, depth, CATCH | RESTART | GUARD)
-    : structLoop(run, node, input, {}, 0, acc, NONE, depth, CATCH | RESTART)
+  return structLoop(run, node, input, {}, 0, acc, NONE, depth, CATCH | RESTART)
 }
 
 function structLoop(
@@ -1008,7 +997,7 @@ function structGuardLoop(
       const key = keys[i]
       if (result === NONE) {
         const child = children[i]
-        result = child.kind.guard(run, child, propertyValue(input, key), depth + 1)
+        result = child.kind.fold(run, child, propertyValue(input, key), depth + 1)
       }
       if (result === run) {
         if (run.status >= SUSPEND) {
@@ -1033,7 +1022,7 @@ function structGuardLoop(
   return input
 }
 
-const structKind: Kind<StructPayload> = { fold: foldStruct, guard: guardStruct }
+const structKind: Kind<StructPayload> = { fold: foldStruct }
 
 /** @internal */
 export function structResumer(
@@ -1138,7 +1127,7 @@ function resolveRecord(p: RecordPayload): ReadonlyArray<IndexPlan> {
 
 function foldRecord(run: Run, node: Node<RecordPayload>, input: unknown, depth: number): unknown {
   if (input === InternalParser.missing) return input
-  if (depth >= LIMIT) return descend(run, node, input, DESCEND)
+  if (depth >= LIMIT) return descend(run, node, input)
   const p = node.p
   let acc: Issues
   let lists: ReadonlyArray<ReadonlyArray<PropertyKey>> | undefined
@@ -1296,7 +1285,7 @@ function spillRecord(
   return run
 }
 
-const recordKind: Kind<RecordPayload> = { fold: foldRecord, guard: foldRecord }
+const recordKind: Kind<RecordPayload> = { fold: foldRecord }
 
 function sequential(options: SchemaAST.ParseOptions): boolean {
   return options.concurrency === undefined || resolveConcurrency(options.concurrency) === 1
@@ -1666,7 +1655,7 @@ function arrayEnd(arrays: SchemaAST.Arrays, len: number): number {
 
 function foldArray(run: Run, node: Node<ArrayPayload>, input: unknown, depth: number): unknown {
   if (input === InternalParser.missing) return input
-  if (depth >= LIMIT) return descend(run, node, input, DESCEND)
+  if (depth >= LIMIT) return descend(run, node, input)
   let len: number
   try {
     if (!Array.isArray(input)) return invalidType(run, node, input)
@@ -1680,9 +1669,8 @@ function foldArray(run: Run, node: Node<ArrayPayload>, input: unknown, depth: nu
 }
 
 function guardArray(run: Run, node: Node<ArrayPayload>, input: unknown, depth: number): unknown {
-  if (node.checks !== undefined || node.encodingChecks !== undefined) return foldArray(run, node, input, depth)
   if (input === InternalParser.missing) return input
-  if (depth >= LIMIT) return descend(run, node, input, DESCEND_GUARD)
+  if (depth >= LIMIT) return descend(run, node, input)
   let len: number
   try {
     if (!Array.isArray(input)) return invalidType(run, node, input)
@@ -1692,7 +1680,7 @@ function guardArray(run: Run, node: Node<ArrayPayload>, input: unknown, depth: n
     return die(run, error)
   }
   if (!sequential(run.options)) return forkArray(run, node, input, len)
-  return arrayGuardLoop(run, node, input, 0, len, undefined, NONE, depth, CATCH | RESTART | GUARD)
+  return arrayGuardLoop(run, node, input, 0, len, undefined, NONE, depth, CATCH | RESTART)
 }
 
 function arrayLoop(
@@ -1763,7 +1751,7 @@ function arrayGuardLoop(
       if (result === NONE) {
         const item = input[i]
         const child = elementAt(p, i, len)
-        result = child.kind.guard(run, child, i < len ? item : InternalParser.missing, depth + 1)
+        result = child.kind.fold(run, child, i < len ? item : InternalParser.missing, depth + 1)
       }
       if (result === run) {
         if (run.status >= SUSPEND) {
@@ -1818,7 +1806,7 @@ function excessElements(
   return acc
 }
 
-const arrayKind: Kind<ArrayPayload> = { fold: foldArray, guard: guardArray }
+const arrayKind: Kind<ArrayPayload> = { fold: foldArray }
 
 const arrayFrame: FrameKind<ArrayPayload, Elements, Array<unknown>> = {
   resume(run, frame, result) {
@@ -1865,7 +1853,7 @@ function member(p: UnionPayload, i: number): Node<unknown> {
 
 function foldUnion(run: Run, node: Node<UnionPayload>, input: unknown, depth: number): unknown {
   if (input === InternalParser.missing) return input
-  if (depth >= LIMIT) return descend(run, node, input, DESCEND)
+  if (depth >= LIMIT) return descend(run, node, input)
   const p = node.p
   const candidates = (p.index ??= p.candidates(p.union.types))(input, p.make)
   if (candidates.length === 0) return failIssue(run, new SchemaIssue.AnyOf(p.union, [], input, run.options))
@@ -1874,20 +1862,6 @@ function foldUnion(run: Run, node: Node<UnionPayload>, input: unknown, depth: nu
     return unionSingle(run, node, input, child.kind.fold(run, child, input, depth + 1))
   }
   return unionLoop(run, node, input, candidates, 0, -1, undefined, undefined, NONE, depth)
-}
-
-function guardUnion(run: Run, node: Node<UnionPayload>, input: unknown, depth: number): unknown {
-  if (node.checks !== undefined || node.encodingChecks !== undefined) return foldUnion(run, node, input, depth)
-  if (input === InternalParser.missing) return input
-  if (depth >= LIMIT) return descend(run, node, input, DESCEND_GUARD)
-  const p = node.p
-  const candidates = (p.index ??= p.candidates(p.union.types))(input, p.make)
-  if (candidates.length === 0) return failIssue(run, new SchemaIssue.AnyOf(p.union, [], input, run.options))
-  if (candidates.length === 1) {
-    const child = member(p, candidates[0])
-    return unionSingle(run, node, input, child.kind.guard(run, child, input, depth + 1))
-  }
-  return unionGuardLoop(run, node, input, candidates, 0, -1, undefined, undefined, NONE, depth)
 }
 
 function unionSingle(run: Run, node: Node<UnionPayload>, input: unknown, result: unknown): unknown {
@@ -1937,46 +1911,7 @@ function unionLoop(
   return failIssue(run, new SchemaIssue.AnyOf(p.union, acc ?? [], input, run.options))
 }
 
-function unionGuardLoop(
-  run: Run,
-  node: Node<UnionPayload>,
-  input: unknown,
-  candidates: ReadonlyArray<number>,
-  i: number,
-  found: number,
-  value: unknown,
-  acc: Issues,
-  result: unknown,
-  depth: number
-): unknown {
-  const p = node.p
-  for (; i < candidates.length; i++) {
-    if (result === NONE) {
-      const child = member(p, candidates[i])
-      result = child.kind.guard(run, child, input, depth + 1)
-    }
-    if (result === run) {
-      if (run.status >= SUSPEND) return spill(run, unionGuardFrame, node, input, candidates, i, found, value, acc, 0)
-      const issue = schemaIssue(run)
-      if (issue === undefined) return run
-      if (acc) acc.push(issue)
-      else acc = [issue]
-    } else {
-      if (found >= 0) {
-        const types = p.union.types
-        return failIssue(run, new SchemaIssue.OneOf(p.union, [types[found], types[candidates[i]]], input, run.options))
-      }
-      if (!p.oneOf) return finish(run, node, input, result)
-      value = result
-      found = candidates[i]
-    }
-    result = NONE
-  }
-  if (found >= 0) return finish(run, node, input, value)
-  return failIssue(run, new SchemaIssue.AnyOf(p.union, acc ?? [], input, run.options))
-}
-
-const unionKind: Kind<UnionPayload> = { fold: foldUnion, guard: guardUnion }
+const unionKind: Kind<UnionPayload> = { fold: foldUnion }
 
 const unionSingleFrame: FrameKind<UnionPayload, unknown, undefined> = {
   resume(run, frame, result) {
@@ -2003,21 +1938,6 @@ const unionFrame: FrameKind<UnionPayload, unknown, ReadonlyArray<number>> = {
   copy: identity
 }
 
-const unionGuardFrame: FrameKind<UnionPayload, unknown, ReadonlyArray<number>> = {
-  resume(run, frame, result) {
-    const node = frame.node
-    const input = frame.input
-    const candidates = frame.out
-    const i = frame.i
-    const found = frame.j
-    const value = frame.value
-    const acc = frame.acc
-    pop(run)
-    return unionGuardLoop(run, node, input, candidates, i, found, value, acc, result, 0)
-  },
-  copy: identity
-}
-
 interface SuspendPayload {
   readonly thunk: () => SchemaAST.AST
   readonly resolver: Resolver
@@ -2029,11 +1949,6 @@ const suspendKind: Kind<SuspendPayload> = {
     const p = node.p
     const target = p.target ?? resolveTarget(run, p)
     return target.kind.fold(run, target, input, depth + 1)
-  },
-  guard(run, node, input, depth) {
-    const p = node.p
-    const target = p.target ?? resolveTarget(run, p)
-    return target.kind.guard(run, target, input, depth + 1)
   }
 }
 
@@ -2072,7 +1987,7 @@ function resolveRun(run: Run, p: DeclarationPayload): ReturnType<SchemaAST.Decla
   return p.run = parse
 }
 
-const declarationKind: Kind<DeclarationPayload> = { fold: foldDeclaration, guard: foldDeclaration }
+const declarationKind: Kind<DeclarationPayload> = { fold: foldDeclaration }
 
 interface ConstructorPayload {
   readonly descriptor: SchemaAST.ConstructorDescriptor
@@ -2099,7 +2014,7 @@ function constructed(run: Run, node: Node<ConstructorPayload>, input: unknown, r
   return run
 }
 
-const constructorKind: Kind<ConstructorPayload> = { fold: foldConstructor, guard: foldConstructor }
+const constructorKind: Kind<ConstructorPayload> = { fold: foldConstructor }
 
 const constructorFrame: FrameKind<ConstructorPayload, unknown, undefined> = {
   resume(run, frame, result) {
@@ -2130,7 +2045,7 @@ function foldDefault(run: Run, node: Node<DefaultPayload>, input: unknown, depth
   return suspendOn(run, wrapEncoding(value, node.ast, input, run.options))
 }
 
-const defaultKind: Kind<DefaultPayload> = { fold: foldDefault, guard: foldDefault }
+const defaultKind: Kind<DefaultPayload> = { fold: foldDefault }
 
 const defaultFrame: FrameKind<DefaultPayload, unknown, undefined> = {
   resume(run, frame, result) {
@@ -2143,7 +2058,7 @@ const defaultFrame: FrameKind<DefaultPayload, unknown, undefined> = {
 
 function foldTemplate(run: Run, node: Node<Node<unknown>>, input: unknown, depth: number): unknown {
   if (input === InternalParser.missing) return input
-  if (depth >= LIMIT) return descend(run, node, input, DESCEND)
+  if (depth >= LIMIT) return descend(run, node, input)
   const inner = node.p
   return templateDone(run, node, input, inner.kind.fold(run, inner, input, depth + 1))
 }
@@ -2159,7 +2074,7 @@ function templateDone(run: Run, node: Node<Node<unknown>>, input: unknown, resul
   return failIssue(run, new SchemaIssue.Composite(node.ast, [error.success], input, run.options))
 }
 
-const templateKind: Kind<Node<unknown>> = { fold: foldTemplate, guard: foldTemplate }
+const templateKind: Kind<Node<unknown>> = { fold: foldTemplate }
 
 const templateFrame: FrameKind<Node<unknown>, unknown, undefined> = {
   resume(run, frame, result) {
@@ -2200,7 +2115,7 @@ function resolveLinkParsers(p: LinkPayload): ReadonlyArray<Node<unknown>> {
 }
 
 function foldLink(run: Run, node: Node<LinkPayload>, input: unknown, depth: number): unknown {
-  if (depth >= LIMIT) return descend(run, node, input, DESCEND)
+  if (depth >= LIMIT) return descend(run, node, input)
   const parsers = linkParsers(node.p)
   const last = parsers.length - 1
   const child = parsers[last]
@@ -2316,10 +2231,10 @@ export function wrapEncoding(
   )
 }
 
-const linkKind: Kind<LinkPayload> = { fold: foldLink, guard: foldLink }
+const linkKind: Kind<LinkPayload> = { fold: foldLink }
 
 function foldMiddleware(run: Run, node: Node<MiddlewarePayload>, input: unknown, depth: number): unknown {
-  if (depth >= LIMIT) return descend(run, node, input, DESCEND)
+  if (depth >= LIMIT) return descend(run, node, input)
   const p = node.p
   const options = run.options
   const upstream = decode(p.prefix ?? resolvePrefix(p), input, options, false)
@@ -2349,7 +2264,7 @@ function resolvePrefix(p: MiddlewarePayload): Node<unknown> {
     : chain(to, links.slice(at + 1), resolver.node(to), false, resolver)
 }
 
-const middlewareKind: Kind<MiddlewarePayload> = { fold: foldMiddleware, guard: foldMiddleware }
+const middlewareKind: Kind<MiddlewarePayload> = { fold: foldMiddleware }
 
 /** @internal */
 export function middlewareNode(
@@ -2415,4 +2330,68 @@ const linkWrapFrame: FrameKind<LinkPayload, unknown, undefined> = {
     return result
   },
   copy: identity
+}
+
+const structGuardKind: Kind<StructPayload> = { fold: guardStruct }
+
+const arrayGuardKind: Kind<ArrayPayload> = { fold: guardArray }
+
+const guards = new WeakMap<Node<unknown>, Node<unknown>>()
+
+const guardResolvers = new WeakMap<Resolver, Resolver>()
+
+function hasKind<P>(node: Node<unknown>, kind: Kind<P>): node is Node<P> {
+  return node.kind === kind
+}
+
+function guardResolver(resolver: Resolver): Resolver {
+  let guarded = guardResolvers.get(resolver)
+  if (guarded === undefined) {
+    guarded = {
+      node: (ast) => guardOf(resolver.node(ast)),
+      field: (ast) => guardOf(resolver.field(ast)),
+      make: resolver.make
+    }
+    guardResolvers.set(resolver, guarded)
+  }
+  return guarded
+}
+
+function guardOf(node: Node<unknown>): Node<unknown> {
+  if (node.checks !== undefined || node.encodingChecks !== undefined) return node
+  const cached = guards.get(node)
+  if (cached !== undefined) return cached
+  let guarded: Node<unknown> = node
+  if (hasKind(node, structKind)) {
+    const p = node.p
+    guarded = new Node(structGuardKind, node.ast, undefined, undefined, {
+      ...p,
+      resolver: guardResolver(p.resolver),
+      children: undefined
+    })
+  } else if (hasKind(node, arrayKind)) {
+    const p = node.p
+    guarded = new Node(arrayGuardKind, node.ast, undefined, undefined, {
+      ...p,
+      resolver: guardResolver(p.resolver),
+      elements: undefined,
+      rest: undefined
+    })
+  } else if (hasKind(node, unionKind)) {
+    const p = node.p
+    guarded = new Node(unionKind, node.ast, undefined, undefined, {
+      ...p,
+      resolver: guardResolver(p.resolver),
+      members: []
+    })
+  } else if (hasKind(node, suspendKind)) {
+    const p = node.p
+    guarded = new Node(suspendKind, node.ast, undefined, undefined, {
+      ...p,
+      resolver: guardResolver(p.resolver),
+      target: undefined
+    })
+  }
+  guards.set(node, guarded)
+  return guarded
 }

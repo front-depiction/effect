@@ -1153,4 +1153,4 @@ export interface Compiler {
 
 const normalCompiler: Compiler = (ast) => CompilerRegistry.resolve(ast).rootEffect
 const constructorCompiler: Compiler = (ast) => CompilerRegistry.resolve(ast).makeEffect
-const guardCompiler: Compiler = (ast) => CompilerRegistry.resolve(ast).guardEffect
+const guardCompiler: Compiler = CompilerRegistry.guardParser

@@ -84,7 +84,6 @@ export interface Entry {
   readonly node: Machine.Node<unknown>
   readonly makeNode: Machine.Node<unknown>
   readonly rootEffect: Parser
-  readonly guardEffect: Parser
 }
 
 class InterpretedEntry implements Entry {
@@ -92,7 +91,6 @@ class InterpretedEntry implements Entry {
   declare private cachedDecodeEffect: Parser | undefined
   declare private cachedMakeEffect: Parser | undefined
   declare private cachedRootEffect: Parser | undefined
-  declare private cachedGuardEffect: Parser | undefined
   declare private cachedNode: Machine.Node<unknown> | undefined
   declare private cachedMakeNode: Machine.Node<unknown> | undefined
 
@@ -110,10 +108,6 @@ class InterpretedEntry implements Entry {
 
   get rootEffect(): Parser {
     return this.cachedRootEffect ??= (input, options) => Machine.decode(this.node, input, options, true)
-  }
-
-  get guardEffect(): Parser {
-    return this.cachedGuardEffect ??= (input, options) => Machine.guard(this.node, input, options)
   }
 
   get parser(): Parser {
@@ -158,10 +152,6 @@ class CompilerEntry extends InterpretedEntry {
   }
 
   override get rootEffect(): Parser {
-    return this.parser
-  }
-
-  override get guardEffect(): Parser {
     return this.parser
   }
 
@@ -229,6 +219,20 @@ export function lazyParser(
   }
   let parser: Parser | undefined
   return (input, options) => (parser ??= entry[operation])(input, options)
+}
+
+const guardParsers = new WeakMap<Entry, Parser>()
+
+/** @internal */
+export function guardParser(ast: SchemaAST.AST): Parser {
+  const entry = resolve(ast)
+  if (entry.resolve !== undefined) return entry.parser
+  let parser = guardParsers.get(entry)
+  if (parser === undefined) {
+    parser = (input, options) => Machine.guard(entry.node, input, options)
+    guardParsers.set(entry, parser)
+  }
+  return parser
 }
 
 /** @internal */
