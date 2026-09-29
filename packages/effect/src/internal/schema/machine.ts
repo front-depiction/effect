@@ -861,25 +861,21 @@ function propertyValue(input: Struct, key: PropertyKey): unknown {
 }
 
 function foldStruct(run: Run, node: Node<StructPayload>, input: unknown, depth: number): unknown {
-  if (input === InternalParser.missing) return input
-  if (depth >= LIMIT) return descend(run, node, input)
-  const options = run.options
-  if (options.errors !== "all" && options.onExcessProperty === undefined && sequential(options)) {
-    if (!isStruct(input)) return invalidType(run, node, input)
-    properties(node.p)
-    return structLoop(run, node, input, {}, 0, undefined, NONE, depth, CATCH)
-  }
-  return structAccumulate(run, node, input, depth)
+  return structEnter(run, node, input, depth, true)
 }
 
 function guardStruct(run: Run, node: Node<StructPayload>, input: unknown, depth: number): unknown {
+  return structEnter(run, node, input, depth, false)
+}
+
+function structEnter(run: Run, node: Node<StructPayload>, input: unknown, depth: number, output: boolean): unknown {
   if (input === InternalParser.missing) return input
   if (depth >= LIMIT) return descend(run, node, input)
   const options = run.options
   if (options.errors !== "all" && options.onExcessProperty === undefined && sequential(options)) {
     if (!isStruct(input)) return invalidType(run, node, input)
     properties(node.p)
-    return structGuardLoop(run, node, input, 0, undefined, NONE, depth, CATCH)
+    return structLoop(run, node, input, output ? {} : undefined, 0, undefined, NONE, depth, CATCH)
   }
   let acc: Issues
   try {
@@ -904,42 +900,14 @@ function guardStruct(run: Run, node: Node<StructPayload>, input: unknown, depth:
     return die(run, error)
   }
   if (!sequential(options)) return forkStruct(run, node, input, acc)
-  return structGuardLoop(run, node, input, 0, acc, NONE, depth, CATCH | RESTART)
-}
-
-function structAccumulate(run: Run, node: Node<StructPayload>, input: unknown, depth: number): unknown {
-  let acc: Issues
-  try {
-    if (!isStruct(input)) return invalidType(run, node, input)
-    properties(node.p)
-    const options = run.options
-    if (options.onExcessProperty === "error") {
-      const expected = node.p.expected
-      const keys = Reflect.ownKeys(input)
-      for (let i = 0; i < keys.length; i++) {
-        const key = keys[i]
-        if (!expected.has(key) && Object.prototype.propertyIsEnumerable.call(input, key)) {
-          const issue = new SchemaIssue.Pointer([key], new SchemaIssue.UnexpectedKey(node.ast, input[key], options))
-          if (options.errors !== "all") {
-            return failIssue(run, new SchemaIssue.Composite(node.ast, [issue], input, options))
-          }
-          if (acc) acc.push(issue)
-          else acc = [issue]
-        }
-      }
-    }
-  } catch (error) {
-    return die(run, error)
-  }
-  if (!sequential(run.options)) return forkStruct(run, node, input, acc)
-  return structLoop(run, node, input, {}, 0, acc, NONE, depth, CATCH | RESTART)
+  return structLoop(run, node, input, output ? {} : undefined, 0, acc, NONE, depth, CATCH | RESTART)
 }
 
 function structLoop(
   run: Run,
   node: Node<StructPayload>,
   input: Struct,
-  out: Struct,
+  out: Struct | undefined,
   i: number,
   acc: Issues,
   result: unknown,
@@ -963,7 +931,7 @@ function structLoop(
         if (acc) acc.push(issue)
         else acc = [issue]
       } else if (result !== InternalParser.missing) {
-        InternalRecord.assignProperty(out, key, result)
+        if (out !== undefined) InternalRecord.assignProperty(out, key, result)
       } else if (!children[i].ast.context?.isOptional) {
         const issue = missingKey(run, node, input, key, children[i].ast)
         if (issue === undefined) return run
@@ -976,50 +944,7 @@ function structLoop(
     return die(run, error)
   }
   if (acc) return failIssue(run, new SchemaIssue.Composite(node.ast, acc, input, run.options))
-  return finish(run, node, input, out)
-}
-
-function structGuardLoop(
-  run: Run,
-  node: Node<StructPayload>,
-  input: Struct,
-  i: number,
-  acc: Issues,
-  result: unknown,
-  depth: number,
-  flags: number
-): unknown {
-  const p = node.p
-  const keys = p.keys
-  const children = properties(p)
-  try {
-    for (; i < keys.length; i++) {
-      const key = keys[i]
-      if (result === NONE) {
-        const child = children[i]
-        result = child.kind.fold(run, child, propertyValue(input, key), depth + 1)
-      }
-      if (result === run) {
-        if (run.status >= SUSPEND) {
-          return spill(run, structGuardFrame, node, input, undefined, i, 0, undefined, acc, flags)
-        }
-        const issue = keyIssue(run, node, input, key)
-        if (issue === undefined) return run
-        if (acc) acc.push(issue)
-        else acc = [issue]
-      } else if (result === InternalParser.missing && !children[i].ast.context?.isOptional) {
-        const issue = missingKey(run, node, input, key, children[i].ast)
-        if (issue === undefined) return run
-        if (acc) acc.push(issue)
-        else acc = [issue]
-      }
-      result = NONE
-    }
-  } catch (error) {
-    return die(run, error)
-  }
-  if (acc) return failIssue(run, new SchemaIssue.Composite(node.ast, acc, input, run.options))
-  return input
+  return finish(run, node, input, out ?? input)
 }
 
 const structKind: Kind<StructPayload> = { fold: foldStruct }
@@ -1047,7 +972,7 @@ export function structResumer(
   }
 }
 
-const structFrame: FrameKind<StructPayload, Struct, Struct> = {
+const structFrame: FrameKind<StructPayload, Struct, Struct | undefined> = {
   resume(run, frame, result) {
     const node = frame.node
     const input = frame.input
@@ -1058,20 +983,7 @@ const structFrame: FrameKind<StructPayload, Struct, Struct> = {
     pop(run)
     return structLoop(run, node, input, out, i, acc, result, 0, flags)
   },
-  copy: copyStruct
-}
-
-const structGuardFrame: FrameKind<StructPayload, Struct, undefined> = {
-  resume(run, frame, result) {
-    const node = frame.node
-    const input = frame.input
-    const i = frame.i
-    const acc = frame.acc
-    const flags = frame.flags
-    pop(run)
-    return structGuardLoop(run, node, input, i, acc, result, 0, flags)
-  },
-  copy: identity
+  copy: (out) => out === undefined ? out : copyStruct(out)
 }
 
 /** @internal */
@@ -1654,21 +1566,14 @@ function arrayEnd(arrays: SchemaAST.Arrays, len: number): number {
 }
 
 function foldArray(run: Run, node: Node<ArrayPayload>, input: unknown, depth: number): unknown {
-  if (input === InternalParser.missing) return input
-  if (depth >= LIMIT) return descend(run, node, input)
-  let len: number
-  try {
-    if (!Array.isArray(input)) return invalidType(run, node, input)
-    resolveElements(node.p)
-    len = input.length
-  } catch (error) {
-    return die(run, error)
-  }
-  if (!sequential(run.options)) return forkArray(run, node, input, len)
-  return arrayLoop(run, node, input, new Array(len), 0, len, undefined, NONE, depth, CATCH | RESTART)
+  return arrayEnter(run, node, input, depth, true)
 }
 
 function guardArray(run: Run, node: Node<ArrayPayload>, input: unknown, depth: number): unknown {
+  return arrayEnter(run, node, input, depth, false)
+}
+
+function arrayEnter(run: Run, node: Node<ArrayPayload>, input: unknown, depth: number, output: boolean): unknown {
   if (input === InternalParser.missing) return input
   if (depth >= LIMIT) return descend(run, node, input)
   let len: number
@@ -1680,14 +1585,25 @@ function guardArray(run: Run, node: Node<ArrayPayload>, input: unknown, depth: n
     return die(run, error)
   }
   if (!sequential(run.options)) return forkArray(run, node, input, len)
-  return arrayGuardLoop(run, node, input, 0, len, undefined, NONE, depth, CATCH | RESTART)
+  return arrayLoop(
+    run,
+    node,
+    input,
+    output ? new Array(len) : undefined,
+    0,
+    len,
+    undefined,
+    NONE,
+    depth,
+    CATCH | RESTART
+  )
 }
 
 function arrayLoop(
   run: Run,
   node: Node<ArrayPayload>,
   input: Elements,
-  out: Array<unknown>,
+  out: Array<unknown> | undefined,
   i: number,
   len: number,
   acc: Issues,
@@ -1711,7 +1627,7 @@ function arrayLoop(
         if (acc) acc.push(issue)
         else acc = [issue]
       } else if (result !== InternalParser.missing) {
-        out[i] = result
+        if (out !== undefined) out[i] = result
       } else {
         const child = elementAt(p, i, len).ast
         if (!child.context?.isOptional) {
@@ -1730,56 +1646,7 @@ function arrayLoop(
     return die(run, error)
   }
   if (acc) return failIssue(run, new SchemaIssue.Composite(node.ast, acc, input, run.options))
-  return finish(run, node, input, out)
-}
-
-function arrayGuardLoop(
-  run: Run,
-  node: Node<ArrayPayload>,
-  input: Elements,
-  i: number,
-  len: number,
-  acc: Issues,
-  result: unknown,
-  depth: number,
-  flags: number
-): unknown {
-  const p = node.p
-  const end = arrayEnd(p.arrays, len)
-  try {
-    for (; i < end; i++) {
-      if (result === NONE) {
-        const item = input[i]
-        const child = elementAt(p, i, len)
-        result = child.kind.fold(run, child, i < len ? item : InternalParser.missing, depth + 1)
-      }
-      if (result === run) {
-        if (run.status >= SUSPEND) {
-          return spill(run, arrayGuardFrame, node, input, undefined, i, len, undefined, acc, flags)
-        }
-        const issue = keyIssue(run, node, input, i)
-        if (issue === undefined) return run
-        if (acc) acc.push(issue)
-        else acc = [issue]
-      } else if (result === InternalParser.missing) {
-        const child = elementAt(p, i, len).ast
-        if (!child.context?.isOptional) {
-          const issue = missingKey(run, node, input, i, child)
-          if (issue === undefined) return run
-          if (acc) acc.push(issue)
-          else acc = [issue]
-        }
-      }
-      result = NONE
-    }
-    const excess = excessElements(run, node, input, len, acc)
-    if (excess === false) return run
-    acc = excess
-  } catch (error) {
-    return die(run, error)
-  }
-  if (acc) return failIssue(run, new SchemaIssue.Composite(node.ast, acc, input, run.options))
-  return input
+  return finish(run, node, input, out ?? input)
 }
 
 function excessElements(
@@ -1808,7 +1675,7 @@ function excessElements(
 
 const arrayKind: Kind<ArrayPayload> = { fold: foldArray }
 
-const arrayFrame: FrameKind<ArrayPayload, Elements, Array<unknown>> = {
+const arrayFrame: FrameKind<ArrayPayload, Elements, Array<unknown> | undefined> = {
   resume(run, frame, result) {
     const node = frame.node
     const input = frame.input
@@ -1820,21 +1687,7 @@ const arrayFrame: FrameKind<ArrayPayload, Elements, Array<unknown>> = {
     pop(run)
     return arrayLoop(run, node, input, out, i, len, acc, result, 0, flags)
   },
-  copy: (out) => out.slice()
-}
-
-const arrayGuardFrame: FrameKind<ArrayPayload, Elements, undefined> = {
-  resume(run, frame, result) {
-    const node = frame.node
-    const input = frame.input
-    const i = frame.i
-    const len = frame.j
-    const acc = frame.acc
-    const flags = frame.flags
-    pop(run)
-    return arrayGuardLoop(run, node, input, i, len, acc, result, 0, flags)
-  },
-  copy: identity
+  copy: (out) => out === undefined ? out : out.slice()
 }
 
 interface UnionPayload {
