@@ -147,7 +147,7 @@ function makeIs<T>(ast: SchemaAST.AST): <I>(input: I) => input is I & T {
       const value = entry.resolve === undefined
         ? Machine.test(entry.node, input, SchemaAST.defaultParseOptions)
         : Machine.hold(entry.parser(input, SchemaAST.defaultParseOptions))
-      if (value !== Machine.halted && value !== InternalParser.missing) return true
+      if (value !== Machine.halted) return value
       const exit = exitOf<T>(value, input)
       if (Exit.isSuccess(exit)) return true
       InternalSchemaCause.getSchemaIssueOrThrow(

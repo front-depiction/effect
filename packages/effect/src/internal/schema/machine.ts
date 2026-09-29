@@ -563,8 +563,14 @@ export function takeHalted(): Pending {
 }
 
 /** @internal */
-export function test(node: Node<unknown>, input: unknown, options: SchemaAST.ParseOptions): unknown {
-  return evaluate(guardOf(node), input, options, true)
+export function test(node: Node<unknown>, input: unknown, options: SchemaAST.ParseOptions): boolean | typeof halted {
+  const run = machine
+  const base = run.sp
+  const value = enter(run, guardOf(node), input, options, true)
+  if (value !== run) return value !== InternalParser.missing
+  if (run.status === ISSUE) return release(run, false)
+  run.halted = release(run, settle(run, base, value, options))
+  return halted
 }
 
 const identity = <O>(out: O): O => out
@@ -975,6 +981,7 @@ function structLoop(
       }
       if (result === run) {
         if (run.status >= SUSPEND) return spill(run, structFrame, node, input, out, i, 0, undefined, acc, flags)
+        if (out === undefined && run.status === ISSUE) return run
         const issue = keyIssue(run, node, input, key)
         if (issue === undefined) return run
         if (acc) acc.push(issue)
@@ -1679,6 +1686,7 @@ function arrayLoop(
       }
       if (result === run) {
         if (run.status >= SUSPEND) return spill(run, arrayFrame, node, input, out, i, len, undefined, acc, flags)
+        if (out === undefined && run.status === ISSUE) return run
         const issue = keyIssue(run, node, input, i)
         if (issue === undefined) return run
         if (acc) acc.push(issue)
