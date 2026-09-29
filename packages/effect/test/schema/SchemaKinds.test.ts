@@ -74,4 +74,16 @@ describe("Schema kinds", () => {
     SchemaParser.decodeUnknownSync(A)({ a: "x" })
     assert.deepStrictEqual({ ...new B({ b: 1 }, captured) }, { b: 1 })
   })
+
+  it("a decode nested in a filter leaves the outer run's options unchanged", () => {
+    const inner = SchemaParser.decodeUnknownSync(Schema.String)
+    const nested = Schema.Number.check(Schema.makeFilter((n: number) => (inner("x"), n > 0) || "not positive"))
+    const schema = Schema.Struct({ a: nested, b: Schema.String, c: Schema.String })
+    const exit = SchemaParser.decodeUnknownExit(schema)({ a: 1, b: 1, c: 1 }, { errors: "all" })
+    assert.isTrue(Exit.isFailure(exit))
+    if (Exit.isFailure(exit)) {
+      const issue = exit.cause.reasons[0]
+      assert.isTrue(issue._tag === "Fail" && issue.error._tag === "Composite" && issue.error.issues.length === 2)
+    }
+  })
 })
