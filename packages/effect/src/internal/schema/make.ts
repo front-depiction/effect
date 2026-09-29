@@ -8,6 +8,13 @@ export const TypeId = "~effect/Schema/Schema"
 
 const RebuildOptions = Symbol()
 
+const Kind = Symbol()
+
+interface Rebuildable {
+  readonly [Kind]?: object | undefined
+  readonly [RebuildOptions]?: object | undefined
+}
+
 const SchemaProto = {
   [TypeId]: TypeId,
   get make() {
@@ -37,15 +44,27 @@ const SchemaProto = {
   check(this: Schema.Top, ...checks: readonly [SchemaAST.Check<unknown>, ...Array<SchemaAST.Check<unknown>>]) {
     return this.rebuild(SchemaAST.appendChecks(this.ast, checks))
   },
-  rebuild(this: Schema.Top, ast: SchemaAST.AST) {
-    return make(ast, (this as any)[RebuildOptions])
+  rebuild(this: Schema.Top & Rebuildable, ast: SchemaAST.AST) {
+    return makeKind(this[Kind] ?? SchemaProto, ast, this[RebuildOptions])
   }
 }
 
 /** @internal */
+export function kind<Members extends object>(members: Members): Members {
+  const proto: Members & { [Kind]?: object } = Object.assign(Object.create(SchemaProto), members)
+  proto[Kind] = proto
+  return proto
+}
+
+/** @internal */
 export function make<S extends Schema.Constraint>(ast: S["ast"], options?: object): S {
+  return makeKind(SchemaProto, ast, options)
+}
+
+/** @internal */
+export function makeKind<S extends Schema.Constraint>(proto: object, ast: S["ast"], options?: object): S {
   function Schema() {}
-  const self = Object.setPrototypeOf(Schema, SchemaProto)
+  const self = Object.setPrototypeOf(Schema, proto)
   if (
     options &&
     (Object.hasOwn(options, "name") || Object.hasOwn(options, "length") || Object.hasOwn(options, "__proto__"))

@@ -2636,17 +2636,21 @@ export interface Literal<L extends SchemaAST.LiteralValue>
  * @category constructors
  * @since 3.10.0
  */
+const LiteralKind = InternalMake.kind({
+  transform<L extends SchemaAST.LiteralValue, L2 extends SchemaAST.LiteralValue>(
+    this: Literal<L>,
+    to: L2
+  ): decodeTo<Literal<L2>, Literal<L>> {
+    const literal = this.literal
+    return this.pipe(decodeTo(Literal(to), {
+      decode: SchemaGetter.transform(() => to),
+      encode: SchemaGetter.transform(() => literal)
+    }))
+  }
+})
+
 export function Literal<L extends SchemaAST.LiteralValue>(literal: L): Literal<L> {
-  const out = make<Literal<L>>(new SchemaAST.Literal(literal), {
-    literal,
-    transform<L2 extends SchemaAST.LiteralValue>(to: L2): decodeTo<Literal<L2>, Literal<L>> {
-      return out.pipe(decodeTo(Literal(to), {
-        decode: SchemaGetter.transform(() => to),
-        encode: SchemaGetter.transform(() => literal)
-      }))
-    }
-  })
-  return out
+  return InternalMake.makeKind(LiteralKind, new SchemaAST.Literal(literal), { literal })
 }
 /**
  * Namespace for {@link TemplateLiteral} helper types.
@@ -3402,20 +3406,21 @@ export interface Struct<Fields extends Struct.Fields> extends BottomLazy<SchemaA
   ): Struct<Simplify<Readonly<To>>>
 }
 
+const StructKind = InternalMake.kind({
+  mapFields<To extends Struct.Fields>(
+    this: Struct<Struct.Fields>,
+    f: (fields: Struct.Fields) => To,
+    options?: {
+      readonly unsafePreserveChecks?: boolean | undefined
+    } | undefined
+  ): Struct<To> {
+    const fields = f(this.fields)
+    return makeStruct(SchemaAST.struct(fields, options?.unsafePreserveChecks ? this.ast.checks : undefined), fields)
+  }
+})
+
 function makeStruct<const Fields extends Struct.Fields>(ast: SchemaAST.Objects, fields: Fields): Struct<Fields> {
-  return make(ast, {
-    fields,
-    mapFields<To extends Struct.Fields>(
-      this: Struct<Fields>,
-      f: (fields: Fields) => To,
-      options?: {
-        readonly unsafePreserveChecks?: boolean | undefined
-      } | undefined
-    ): Struct<To> {
-      const fields = f(this.fields)
-      return makeStruct(SchemaAST.struct(fields, options?.unsafePreserveChecks ? this.ast.checks : undefined), fields)
-    }
-  })
+  return InternalMake.makeKind(StructKind, ast, { fields })
 }
 /**
  * Defines a struct schema from a map of field schemas.
@@ -4253,20 +4258,21 @@ export interface Tuple<Elements extends Tuple.Elements> extends
   ): Tuple<Simplify<Readonly<To>>>
 }
 
+const TupleKind = InternalMake.kind({
+  mapElements<To extends Tuple.Elements>(
+    this: Tuple<Tuple.Elements>,
+    f: (elements: Tuple.Elements) => To,
+    options?: {
+      readonly unsafePreserveChecks?: boolean | undefined
+    } | undefined
+  ): Tuple<Simplify<Readonly<To>>> {
+    const elements = f(this.elements)
+    return makeTuple(SchemaAST.tuple(elements, options?.unsafePreserveChecks ? this.ast.checks : undefined), elements)
+  }
+})
+
 function makeTuple<Elements extends Tuple.Elements>(ast: SchemaAST.Arrays, elements: Elements): Tuple<Elements> {
-  return make(ast, {
-    elements,
-    mapElements<To extends Tuple.Elements>(
-      this: Tuple<Elements>,
-      f: (elements: Elements) => To,
-      options?: {
-        readonly unsafePreserveChecks?: boolean | undefined
-      } | undefined
-    ): Tuple<Simplify<Readonly<To>>> {
-      const elements = f(this.elements)
-      return makeTuple(SchemaAST.tuple(elements, options?.unsafePreserveChecks ? this.ast.checks : undefined), elements)
-    }
-  })
+  return InternalMake.makeKind(TupleKind, ast, { elements })
 }
 /**
  * Defines a fixed-length tuple schema from an array of element schemas.
@@ -4760,26 +4766,27 @@ export interface Union<Members extends ReadonlyArray<Constraint>> extends
   ): Union<Simplify<Readonly<To>>>
 }
 
+const UnionKind = InternalMake.kind({
+  mapMembers<To extends ReadonlyArray<Constraint>>(
+    this: Union<ReadonlyArray<Constraint>>,
+    f: (members: ReadonlyArray<Constraint>) => To,
+    options?: {
+      readonly unsafePreserveChecks?: boolean | undefined
+    } | undefined
+  ): Union<Simplify<Readonly<To>>> {
+    const members = f(this.members)
+    return makeUnion(
+      SchemaAST.union(members, this.ast.options, options?.unsafePreserveChecks ? this.ast.checks : undefined),
+      members
+    )
+  }
+})
+
 function makeUnion<Members extends ReadonlyArray<Constraint>>(
   ast: SchemaAST.Union<Members[number]["ast"]>,
   members: Members
 ): Union<Members> {
-  return make(ast, {
-    members,
-    mapMembers<To extends ReadonlyArray<Constraint>>(
-      this: Union<Members>,
-      f: (members: Members) => To,
-      options?: {
-        readonly unsafePreserveChecks?: boolean | undefined
-      } | undefined
-    ): Union<Simplify<Readonly<To>>> {
-      const members = f(this.members)
-      return makeUnion(
-        SchemaAST.union(members, this.ast.options, options?.unsafePreserveChecks ? this.ast.checks : undefined),
-        members
-      )
-    }
-  })
+  return InternalMake.makeKind(UnionKind, ast, { members })
 }
 /**
  * Creates a union schema from an array of member schemas. Members are tested in
@@ -4849,26 +4856,30 @@ export interface Literals<L extends ReadonlyArray<SchemaAST.LiteralValue>>
  * @category constructors
  * @since 4.0.0
  */
+const LiteralsKind = InternalMake.kind({
+  mapMembers<L extends ReadonlyArray<SchemaAST.LiteralValue>, To extends ReadonlyArray<Constraint>>(
+    this: Literals<L>,
+    f: (members: Literals<L>["members"]) => To
+  ): Union<Simplify<Readonly<To>>> {
+    return Union(f(this.members))
+  },
+  pick<const L2 extends ReadonlyArray<SchemaAST.LiteralValue>>(literals: L2): Literals<L2> {
+    return Literals(literals)
+  },
+  transform<
+    L extends ReadonlyArray<SchemaAST.LiteralValue>,
+    const L2 extends { readonly [I in keyof L]: SchemaAST.LiteralValue }
+  >(
+    this: Literals<L>,
+    to: L2
+  ): Union<{ [I in keyof L]: decodeTo<Literal<L2[I]>, Literal<L[I]>> }> {
+    return Union(this.members.map((member, index) => member.transform(to[index]))) as any
+  }
+})
+
 export function Literals<const L extends ReadonlyArray<SchemaAST.LiteralValue>>(literals: L): Literals<L> {
   const members = literals.map(Literal) as { readonly [K in keyof L]: Literal<L[K]> }
-  return make(SchemaAST.union(members, undefined, undefined), {
-    literals,
-    members,
-    mapMembers<To extends ReadonlyArray<Constraint>>(
-      this: Literals<L>,
-      f: (members: Literals<L>["members"]) => To
-    ): Union<Simplify<Readonly<To>>> {
-      return Union(f(this.members))
-    },
-    pick<const L2 extends ReadonlyArray<L[number]>>(literals: L2): Literals<L2> {
-      return Literals(literals)
-    },
-    transform<const L2 extends { readonly [I in keyof L]: SchemaAST.LiteralValue }>(
-      to: L2
-    ): Union<{ [I in keyof L]: decodeTo<Literal<L2[I]>, Literal<L[I]>> }> {
-      return Union(members.map((member, index) => member.transform(to[index]))) as any
-    }
-  })
+  return InternalMake.makeKind(LiteralsKind, SchemaAST.union(members, undefined, undefined), { literals, members })
 }
 /**
  * Type-level representation returned by {@link NullOr}.
