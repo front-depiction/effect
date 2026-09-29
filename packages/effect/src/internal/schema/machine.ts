@@ -47,6 +47,11 @@ const unplanned = Symbol()
 
 interface Kind<P> {
   fold(run: Run, node: Node<P>, input: unknown, depth: number): unknown
+  readonly leaf?: string
+}
+
+function leafOf(node: Node<unknown>): string | undefined {
+  return node.checks === undefined ? node.kind.leaf : undefined
 }
 
 /** @internal */
@@ -583,35 +588,35 @@ function foldString(run: Run, node: Node<undefined>, input: unknown): unknown {
   return typeof input === "string" ? done(run, node, input) : invalidType(run, node, input)
 }
 
-const stringKind: Kind<undefined> = { fold: foldString }
+const stringKind: Kind<undefined> = { fold: foldString, leaf: "string" }
 
 function foldNumber(run: Run, node: Node<undefined>, input: unknown): unknown {
   if (input === InternalParser.missing) return input
   return typeof input === "number" ? done(run, node, input) : invalidType(run, node, input)
 }
 
-const numberKind: Kind<undefined> = { fold: foldNumber }
+const numberKind: Kind<undefined> = { fold: foldNumber, leaf: "number" }
 
 function foldBoolean(run: Run, node: Node<undefined>, input: unknown): unknown {
   if (input === InternalParser.missing) return input
   return typeof input === "boolean" ? done(run, node, input) : invalidType(run, node, input)
 }
 
-const booleanKind: Kind<undefined> = { fold: foldBoolean }
+const booleanKind: Kind<undefined> = { fold: foldBoolean, leaf: "boolean" }
 
 function foldBigInt(run: Run, node: Node<undefined>, input: unknown): unknown {
   if (input === InternalParser.missing) return input
   return typeof input === "bigint" ? done(run, node, input) : invalidType(run, node, input)
 }
 
-const bigintKind: Kind<undefined> = { fold: foldBigInt }
+const bigintKind: Kind<undefined> = { fold: foldBigInt, leaf: "bigint" }
 
 function foldSymbol(run: Run, node: Node<undefined>, input: unknown): unknown {
   if (input === InternalParser.missing) return input
   return typeof input === "symbol" ? done(run, node, input) : invalidType(run, node, input)
 }
 
-const symbolKind: Kind<undefined> = { fold: foldSymbol }
+const symbolKind: Kind<undefined> = { fold: foldSymbol, leaf: "symbol" }
 
 function foldObjectKeyword(run: Run, node: Node<undefined>, input: unknown): unknown {
   if (input === InternalParser.missing) return input
@@ -788,7 +793,8 @@ function structPayload(ast: SchemaAST.Objects, resolver: Resolver): StructPayloa
     resolver,
     keys: ast.propertySignatures.map((ps) => ps.name),
     expected: new Set(ast.propertySignatures.map((ps) => typeof ps.name === "number" ? String(ps.name) : ps.name)),
-    children: undefined
+    children: undefined,
+    leaves: []
   }
 }
 
@@ -798,7 +804,8 @@ export const arraysNode = (ast: SchemaAST.Arrays, resolver: Resolver): Node<unkn
     arrays: ast,
     resolver,
     elements: undefined,
-    rest: undefined
+    rest: undefined,
+    leaf: undefined
   })
 
 /** @internal */
@@ -866,6 +873,7 @@ interface StructPayload {
   readonly keys: ReadonlyArray<PropertyKey>
   readonly expected: ReadonlySet<PropertyKey>
   children: ReadonlyArray<Node<unknown>> | undefined
+  leaves: ReadonlyArray<string | undefined>
 }
 
 function properties(p: StructPayload): ReadonlyArray<Node<unknown>> {
@@ -874,7 +882,9 @@ function properties(p: StructPayload): ReadonlyArray<Node<unknown>> {
 
 function resolveProperties(p: StructPayload): ReadonlyArray<Node<unknown>> {
   const resolver = p.resolver
-  return p.children = p.objects.propertySignatures.map((ps) => resolver.field(ps.type))
+  const children = p.objects.propertySignatures.map((ps) => resolver.field(ps.type))
+  p.leaves = children.map(leafOf)
+  return p.children = children
 }
 
 type Struct = Record<PropertyKey, unknown>
@@ -949,12 +959,18 @@ function structLoop(
   const p = node.p
   const keys = p.keys
   const children = properties(p)
+  const leaves = p.leaves
   try {
     for (; i < keys.length; i++) {
       const key = keys[i]
       if (result === NONE) {
-        const child = children[i]
-        result = child.kind.fold(run, child, propertyValue(input, key), depth + 1)
+        const value = propertyValue(input, key)
+        if (typeof value === leaves[i]) {
+          result = value
+        } else {
+          const child = children[i]
+          result = child.kind.fold(run, child, value, depth + 1)
+        }
       }
       if (result === run) {
         if (run.status >= SUSPEND) return spill(run, structFrame, node, input, out, i, 0, undefined, acc, flags)
@@ -1570,6 +1586,7 @@ interface ArrayPayload {
   readonly resolver: Resolver
   elements: ReadonlyArray<Node<unknown>> | undefined
   rest: ReadonlyArray<Node<unknown>> | undefined
+  leaf: string | undefined
 }
 
 type Elements = ReadonlyArray<unknown>
@@ -1577,8 +1594,10 @@ type Elements = ReadonlyArray<unknown>
 function resolveElements(p: ArrayPayload): void {
   if (p.elements === undefined) {
     const resolver = p.resolver
-    p.elements = p.arrays.elements.map((ast) => resolver.field(ast))
-    p.rest = p.arrays.rest.map((ast) => resolver.field(ast))
+    const elements = p.elements = p.arrays.elements.map((ast) => resolver.field(ast))
+    const rest = p.arrays.rest.map((ast) => resolver.field(ast))
+    p.leaf = elements.length === 0 && rest.length === 1 ? leafOf(rest[0]) : undefined
+    p.rest = rest
   }
 }
 
@@ -1645,12 +1664,17 @@ function arrayLoop(
 ): unknown {
   const p = node.p
   const end = arrayEnd(p.arrays, len)
+  const leaf = p.leaf
   try {
     for (; i < end; i++) {
       if (result === NONE) {
         const item = input[i]
-        const child = elementAt(p, i, len)
-        result = child.kind.fold(run, child, i < len ? item : InternalParser.missing, depth + 1)
+        if (typeof item === leaf) {
+          result = item
+        } else {
+          const child = elementAt(p, i, len)
+          result = child.kind.fold(run, child, i < len ? item : InternalParser.missing, depth + 1)
+        }
       }
       if (result === run) {
         if (run.status >= SUSPEND) return spill(run, arrayFrame, node, input, out, i, len, undefined, acc, flags)
@@ -2252,7 +2276,8 @@ function guardOf(node: Node<unknown>): Node<unknown> {
     guarded = new Node(structGuardKind, node.ast, undefined, undefined, {
       ...p,
       resolver: guardResolver(p.resolver),
-      children: undefined
+      children: undefined,
+      leaves: []
     })
   } else if (hasKind(node, arrayKind)) {
     const p = node.p
@@ -2260,7 +2285,8 @@ function guardOf(node: Node<unknown>): Node<unknown> {
       ...p,
       resolver: guardResolver(p.resolver),
       elements: undefined,
-      rest: undefined
+      rest: undefined,
+      leaf: undefined
     })
   } else if (hasKind(node, unionKind)) {
     const p = node.p
