@@ -410,7 +410,7 @@ export function decodeUnknownExit<S extends Schema.ConstraintDecoder<unknown>>(
   schema: S,
   options?: SchemaAST.ParseOptions
 ): (input: unknown, options?: SchemaAST.ParseOptions) => Exit.Exit<S["Type"], SchemaIssue.Issue> {
-  return asExit(decodeUnknownEffect(schema, options))
+  return exitAdapter(schema.ast, options)
 }
 
 /**
@@ -756,7 +756,7 @@ export function encodeUnknownExit<S extends Schema.ConstraintEncoder<unknown>>(
   schema: S,
   options?: SchemaAST.ParseOptions
 ): (input: unknown, options?: SchemaAST.ParseOptions) => Exit.Exit<S["Encoded"], SchemaIssue.Issue> {
-  return asExit(encodeUnknownEffect(schema, options))
+  return exitAdapter(SchemaAST.flip(schema.ast), options)
 }
 
 /**
@@ -1020,6 +1020,19 @@ function rooted(
       input,
       defaults === undefined ? overrides ?? SchemaAST.defaultParseOptions : mergeParseOptions(defaults, overrides)
     )
+}
+
+function exitAdapter<T>(
+  ast: SchemaAST.AST,
+  defaults: SchemaAST.ParseOptions | undefined
+): (input: unknown, options?: SchemaAST.ParseOptions) => Exit.Exit<T, SchemaIssue.Issue> {
+  const run = rooted(ast, defaults)
+  return (input, options) => {
+    const value = run(input, options)
+    return value !== Machine.halted && value !== InternalParser.missing
+      ? Exit.succeed(value as T)
+      : exitOf<T>(value, input)
+  }
 }
 
 function syncOf<T>(

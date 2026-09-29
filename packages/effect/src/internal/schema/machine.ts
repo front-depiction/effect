@@ -131,6 +131,7 @@ class Run {
   result: Exit.Exit<unknown, Issue> | undefined = undefined
   options: SchemaAST.ParseOptions = {}
   halted: Pending = idle
+  sync = false
   readonly stack: Array<AnyFrame> = []
   sp = 0
 }
@@ -505,12 +506,22 @@ function restart(k: Snapshot): Pending {
   return release(run, settle(run, base, value, k.options))
 }
 
-function enter(run: Run, node: Node<unknown>, input: unknown, options: SchemaAST.ParseOptions, root: boolean): unknown {
+function enter(
+  run: Run,
+  node: Node<unknown>,
+  input: unknown,
+  options: SchemaAST.ParseOptions,
+  root: boolean,
+  sync: boolean
+): unknown {
   if (root) run.planFailure = unplanned
   const previous = run.options
+  const previousSync = run.sync
   run.options = options
+  run.sync = sync
   const value = start(run, node, input, run.sp, previous, root)
   run.options = previous
+  run.sync = previousSync
   return value
 }
 
@@ -523,7 +534,7 @@ export function decode(
 ): Pending {
   const run = machine
   const base = run.sp
-  const value = enter(run, node, input, options, root)
+  const value = enter(run, node, input, options, root, false)
   const result = run.result
   if (result !== undefined) {
     run.result = undefined
@@ -542,7 +553,7 @@ export const halted = Symbol()
 export function evaluate(node: Node<unknown>, input: unknown, options: SchemaAST.ParseOptions, root: boolean): unknown {
   const run = machine
   const base = run.sp
-  const value = enter(run, node, input, options, root)
+  const value = enter(run, node, input, options, root, true)
   run.result = undefined
   if (value !== run) return value
   run.halted = release(run, settle(run, base, value, options))
@@ -567,7 +578,7 @@ export function takeHalted(): Pending {
 export function test(node: Node<unknown>, input: unknown, options: SchemaAST.ParseOptions): boolean | typeof halted {
   const run = machine
   const base = run.sp
-  const value = enter(run, guardOf(node), input, options, true)
+  const value = enter(run, guardOf(node), input, options, true, true)
   if (value !== run) return value !== InternalParser.missing
   if (run.status === ISSUE) return release(run, false)
   run.halted = release(run, settle(run, base, value, options))
@@ -2136,9 +2147,18 @@ function linkAfter(
     return value
   }
   if (!node.p.wrap) return run
+  if (run.sync) return encodingFailure(run, node.ast, input)
   const failure = failureExit(run)
   spill(run, linkWrapFrame, node, input, undefined, 0, 0, undefined, undefined, 0)
   return suspendOn(run, wrapEncoding(failure, node.ast, input, run.options))
+}
+
+function encodingFailure(run: Run, ast: SchemaAST.AST, input: unknown): Run {
+  const options = run.options
+  const issue = run.issue
+  return run.status === ISSUE && issue !== undefined
+    ? failIssue(run, new SchemaIssue.Encoding(ast, issue, input, options))
+    : failCause(run, causeMap(run.cause, (issue) => new SchemaIssue.Encoding(ast, issue, input, options)))
 }
 
 /** @internal */
