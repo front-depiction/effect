@@ -77,7 +77,6 @@ export class Node<P> {
 
 interface FrameKind<P, I, O> {
   resume(run: Run, frame: Frame<P, I, O>, result: unknown): unknown
-  copy(out: O): O
 }
 
 class Frame<P, I, O> {
@@ -445,11 +444,11 @@ function restore(run: Run, frames: ReadonlyArray<AnyFrame>): void {
       frame.kind,
       frame.node,
       frame.input,
-      frame.kind.copy(frame.out),
+      frame.out,
       frame.i,
       frame.j,
       frame.value,
-      frame.acc ? [frame.acc[0], ...frame.acc.slice(1)] : undefined,
+      frame.acc,
       frame.flags
     )
     const top = run.stack[run.sp - 1]
@@ -581,16 +580,13 @@ export function test(node: Node<unknown>, input: unknown, options: SchemaAST.Par
   return halted
 }
 
-const identity = <O>(out: O): O => out
-
 const suspensionFrame: FrameKind<unknown, unknown, undefined> = {
   resume(run, frame, result) {
     const node = frame.node
     const input = frame.input
     pop(run)
     return result === run ? run : complete(run, node, input, result)
-  },
-  copy: identity
+  }
 }
 
 function suspendAt(run: Run, node: Node<unknown>, input: unknown, pending: Pending): Run {
@@ -911,12 +907,6 @@ type Struct = Record<PropertyKey, unknown>
 const isStruct = (input: unknown): input is Struct =>
   typeof input === "object" && input !== null && !Array.isArray(input)
 
-function copyStruct(out: Struct): Struct {
-  const copy: Struct = {}
-  for (const key of Reflect.ownKeys(out)) InternalRecord.assignProperty(copy, key, out[key])
-  return copy
-}
-
 function propertyValue(input: Struct, key: PropertyKey): unknown {
   return (key === "__proto__" ? Object.hasOwn(input, key) : key in input) ? input[key] : InternalParser.missing
 }
@@ -1050,8 +1040,7 @@ const structFrame: FrameKind<StructPayload, Struct, Struct | undefined> = {
     const flags = frame.flags
     pop(run)
     return structLoop(run, node, input, out, i, acc, result, 0, flags)
-  },
-  copy: (out) => out === undefined ? out : copyStruct(out)
+  }
 }
 
 /** @internal */
@@ -1410,8 +1399,7 @@ function joined<P, S extends Accumulator<unknown>>(
       const s = frame.out
       pop(run)
       return result === run ? run : done(run, node, s)
-    },
-    copy: identity
+    }
   }
 }
 
@@ -1581,8 +1569,7 @@ const recordFrame: FrameKind<RecordPayload, Struct, Struct> = {
     const acc = frame.acc
     pop(run)
     return recordLoop(run, node, input, out, i, j, keys, lists, k2, acc, result, 0)
-  },
-  copy: copyStruct
+  }
 }
 
 const recordKeyFrame: FrameKind<RecordPayload, Struct, Struct> = {
@@ -1597,8 +1584,7 @@ const recordKeyFrame: FrameKind<RecordPayload, Struct, Struct> = {
     const acc = frame.acc
     pop(run)
     return recordLoop(run, node, input, out, i, j, keys, lists, NONE, acc, result, 0)
-  },
-  copy: copyStruct
+  }
 }
 
 interface ArrayPayload {
@@ -1763,8 +1749,7 @@ const arrayFrame: FrameKind<ArrayPayload, Elements, Array<unknown> | undefined> 
     const flags = frame.flags
     pop(run)
     return arrayLoop(run, node, input, out, i, len, acc, result, 0, flags)
-  },
-  copy: (out) => out === undefined ? out : out.slice()
+  }
 }
 
 interface UnionPayload {
@@ -1849,8 +1834,7 @@ const unionSingleFrame: FrameKind<UnionPayload, unknown, undefined> = {
     const input = frame.input
     pop(run)
     return unionSingle(run, node, input, result)
-  },
-  copy: identity
+  }
 }
 
 const unionFrame: FrameKind<UnionPayload, unknown, ReadonlyArray<number>> = {
@@ -1864,8 +1848,7 @@ const unionFrame: FrameKind<UnionPayload, unknown, ReadonlyArray<number>> = {
     const acc = frame.acc
     pop(run)
     return unionLoop(run, node, input, candidates, i, found, value, acc, result, 0)
-  },
-  copy: identity
+  }
 }
 
 interface SuspendPayload {
@@ -1952,8 +1935,7 @@ const constructorFrame: FrameKind<ConstructorPayload, unknown, undefined> = {
     const input = frame.input
     pop(run)
     return constructed(run, node, input, result)
-  },
-  copy: identity
+  }
 }
 
 interface DefaultPayload {
@@ -1982,8 +1964,7 @@ const defaultFrame: FrameKind<DefaultPayload, unknown, undefined> = {
     const inner = frame.node.p.inner
     pop(run)
     return result === run ? run : inner.kind.fold(run, inner, result, 0)
-  },
-  copy: identity
+  }
 }
 
 function foldTemplate(run: Run, node: Node<Node<unknown>>, input: unknown, depth: number): unknown {
@@ -2012,8 +1993,7 @@ const templateFrame: FrameKind<Node<unknown>, unknown, undefined> = {
     const input = frame.input
     pop(run)
     return templateDone(run, node, input, result)
-  },
-  copy: identity
+  }
 }
 
 type Getter = SchemaGetter.Getter<unknown, unknown, unknown>
@@ -2240,8 +2220,7 @@ const linkParseFrame: FrameKind<LinkPayload, unknown, undefined> = {
     const i = frame.i
     pop(run)
     return linkTransform(run, node, input, i, result, 0)
-  },
-  copy: identity
+  }
 }
 
 const linkEffectFrame: FrameKind<LinkPayload, unknown, undefined> = {
@@ -2251,24 +2230,21 @@ const linkEffectFrame: FrameKind<LinkPayload, unknown, undefined> = {
     const i = frame.i
     pop(run)
     return linkAfter(run, node, input, i, result, 0)
-  },
-  copy: identity
+  }
 }
 
 const linkLocalFrame: FrameKind<LinkPayload, unknown, undefined> = {
   resume(run, _, result) {
     pop(run)
     return result
-  },
-  copy: identity
+  }
 }
 
 const linkWrapFrame: FrameKind<LinkPayload, unknown, undefined> = {
   resume(run, _, result) {
     pop(run)
     return result
-  },
-  copy: identity
+  }
 }
 
 const structGuardKind: Kind<StructPayload> = { fold: guardStruct }
