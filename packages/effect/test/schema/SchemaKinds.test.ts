@@ -35,13 +35,14 @@ describe("Schema kinds", () => {
 
   it("a user constructor in an extend chain receives the forwarded options", () => {
     const seen: Array<unknown> = []
-    class A extends Schema.Class<A>("A")({ a: Schema.String }) {
-      constructor(input: { readonly a: string }, options?: Schema.MakeOptions) {
-        seen.push(options?.disableChecks)
-        super(input, options)
+    class A extends Schema.Class<A>("A")({ a: Schema.String }) {}
+    const Observed = new Proxy(A, {
+      construct(target, args, newTarget) {
+        seen.push(args[1]?.disableChecks)
+        return Reflect.construct(target, args, newTarget)
       }
-    }
-    class B extends A.extend<B>("B")({ b: Schema.Number }) {}
+    })
+    class B extends Observed.extend<B>("B")({ b: Schema.Number }) {}
     const b = new B({ a: "a", b: 1 })
     assert.deepStrictEqual(seen, [true])
     assert.deepStrictEqual({ ...b }, { a: "a", b: 1 })
@@ -64,14 +65,15 @@ describe("Schema kinds", () => {
 
   it("a Class accepts an already validated value only for the class it was issued to", () => {
     let captured: Schema.MakeOptions | undefined
-    class A extends Schema.Class<A>("A")({ a: Schema.String }) {
-      constructor(input: { readonly a: string }, options?: Schema.MakeOptions) {
-        captured ??= options
-        super(input, options)
+    class A extends Schema.Class<A>("A")({ a: Schema.String }) {}
+    const Observed = new Proxy(A, {
+      construct(target, args, newTarget) {
+        captured ??= args[1]
+        return Reflect.construct(target, args, newTarget)
       }
-    }
+    })
     class B extends Schema.Class<B>("B")({ b: Schema.Number }) {}
-    SchemaParser.decodeUnknownSync(A)({ a: "x" })
+    SchemaParser.decodeUnknownSync(Observed)({ a: "x" })
     assert.deepStrictEqual({ ...new B({ b: 1 }, captured) }, { b: 1 })
   })
 

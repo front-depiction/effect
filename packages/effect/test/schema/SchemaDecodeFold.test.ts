@@ -21,7 +21,7 @@ const later = (name: string) =>
       Effect.suspend(() => {
         log.push(`${name}:${s}`)
         return s.startsWith("bad")
-          ? Effect.fail(new SchemaIssue.InvalidValue(s, { message: name }))
+          ? Effect.fail(new SchemaIssue.InvalidValue({ message: name }))
           : Effect.succeed(s + "!")
       })
     ),

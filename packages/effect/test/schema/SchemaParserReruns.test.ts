@@ -17,7 +17,7 @@ const suspended = (message: string) =>
   Schema.String.pipe(Schema.decodeTo(Schema.String, {
     decode: SchemaGetter.transformEffect((s: string) =>
       Effect.suspend(() =>
-        s.startsWith("boom") ? Effect.fail(new SchemaIssue.InvalidValue(s, { message })) : Effect.succeed(s)
+        s.startsWith("boom") ? Effect.fail(new SchemaIssue.InvalidValue({ message })) : Effect.succeed(s)
       )
     ),
     encode: SchemaGetter.passthrough()
