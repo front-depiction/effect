@@ -20,6 +20,7 @@ import * as Effect from "./Effect.ts"
 import { format, formatDate, formatJson } from "./Formatter.ts"
 import { dual } from "./Function.ts"
 import * as Machine from "./internal/schema/machine.ts"
+import { tagged } from "./internal/schema/tagged.ts"
 import * as Option from "./Option.ts"
 import * as Pipeable from "./Pipeable.ts"
 import * as Predicate from "./Predicate.ts"
@@ -110,46 +111,49 @@ export const Middleware: new<T, E, RDE, RDT, RET, REE>(
     effect: Effect.Effect<Option.Option<T>, SchemaIssue.Issue, RET>,
     options: SchemaAST.ParseOptions
   ) => Effect.Effect<Option.Option<E>, SchemaIssue.Issue, REE>
-) => Middleware<T, E, RDE, RDT, RET, REE> = class<in out T, in out E, RDE, RDT, RET, REE> extends Pipeable.Class {
-  readonly _tag = "Middleware"
-  readonly decode: (
-    effect: Effect.Effect<Option.Option<E>, SchemaIssue.Issue, RDE>,
-    options: SchemaAST.ParseOptions
-  ) => Effect.Effect<Option.Option<T>, SchemaIssue.Issue, RDT>
-  readonly encode: (
-    effect: Effect.Effect<Option.Option<T>, SchemaIssue.Issue, RET>,
-    options: SchemaAST.ParseOptions
-  ) => Effect.Effect<Option.Option<E>, SchemaIssue.Issue, REE>
-
-  constructor(
-    decode: (
+) => Middleware<T, E, RDE, RDT, RET, REE> = tagged(
+  "Middleware",
+  class<in out T, in out E, RDE, RDT, RET, REE> extends Pipeable.Class {
+    declare readonly _tag: "Middleware"
+    readonly decode: (
       effect: Effect.Effect<Option.Option<E>, SchemaIssue.Issue, RDE>,
       options: SchemaAST.ParseOptions
-    ) => Effect.Effect<Option.Option<T>, SchemaIssue.Issue, RDT>,
-    encode: (
+    ) => Effect.Effect<Option.Option<T>, SchemaIssue.Issue, RDT>
+    readonly encode: (
       effect: Effect.Effect<Option.Option<T>, SchemaIssue.Issue, RET>,
       options: SchemaAST.ParseOptions
     ) => Effect.Effect<Option.Option<E>, SchemaIssue.Issue, REE>
-  ) {
-    super()
-    this.decode = decode
-    this.encode = encode
+
+    constructor(
+      decode: (
+        effect: Effect.Effect<Option.Option<E>, SchemaIssue.Issue, RDE>,
+        options: SchemaAST.ParseOptions
+      ) => Effect.Effect<Option.Option<T>, SchemaIssue.Issue, RDT>,
+      encode: (
+        effect: Effect.Effect<Option.Option<T>, SchemaIssue.Issue, RET>,
+        options: SchemaAST.ParseOptions
+      ) => Effect.Effect<Option.Option<E>, SchemaIssue.Issue, REE>
+    ) {
+      super()
+      this.decode = decode
+      this.encode = encode
+    }
+    flip(): Middleware<E, T, RET, REE, RDE, RDT> {
+      return new Middleware(this.encode, this.decode)
+    }
+    /** @internal */
+    getNode(
+      ast: SchemaAST.AST,
+      links: ReadonlyArray<SchemaAST.Link>,
+      at: number,
+      local: Machine.Node<unknown> | undefined,
+      wrap: boolean,
+      resolver: Machine.Resolver
+    ): Machine.Node<unknown> {
+      return Machine.middlewareNode(this, ast, links, at, local, wrap, resolver)
+    }
   }
-  flip(): Middleware<E, T, RET, REE, RDE, RDT> {
-    return new Middleware(this.encode, this.decode)
-  }
-  /** @internal */
-  getNode(
-    ast: SchemaAST.AST,
-    links: ReadonlyArray<SchemaAST.Link>,
-    at: number,
-    local: Machine.Node<unknown> | undefined,
-    wrap: boolean,
-    resolver: Machine.Resolver
-  ): Machine.Node<unknown> {
-    return Machine.middlewareNode(this, ast, links, at, local, wrap, resolver)
-  }
-}
+)
 
 const TypeId = "~effect/SchemaTransformation/Transformation"
 
@@ -213,24 +217,29 @@ export interface Transformation<in out T, in out E, RD = never, RE = never> exte
 export const Transformation: new<T, E, RD = never, RE = never>(
   decode: SchemaGetter.Getter<T, E, RD>,
   encode: SchemaGetter.Getter<E, T, RE>
-) => Transformation<T, E, RD, RE> = class<in out T, in out E, RD = never, RE = never> extends Pipeable.Class {
-  readonly [TypeId] = TypeId
-  readonly _tag = "Transformation"
-  readonly decode: SchemaGetter.Getter<T, E, RD>
-  readonly encode: SchemaGetter.Getter<E, T, RE>
+) => Transformation<T, E, RD, RE> = tagged(
+  "Transformation",
+  class<in out T, in out E, RD = never, RE = never> extends Pipeable.Class {
+    get [TypeId](): typeof TypeId {
+      return TypeId
+    }
+    declare readonly _tag: "Transformation"
+    readonly decode: SchemaGetter.Getter<T, E, RD>
+    readonly encode: SchemaGetter.Getter<E, T, RE>
 
-  constructor(
-    decode: SchemaGetter.Getter<T, E, RD>,
-    encode: SchemaGetter.Getter<E, T, RE>
-  ) {
-    super()
-    this.decode = decode
-    this.encode = encode
+    constructor(
+      decode: SchemaGetter.Getter<T, E, RD>,
+      encode: SchemaGetter.Getter<E, T, RE>
+    ) {
+      super()
+      this.decode = decode
+      this.encode = encode
+    }
+    flip(): Transformation<E, T, RE, RD> {
+      return new Transformation(this.encode, this.decode)
+    }
   }
-  flip(): Transformation<E, T, RE, RD> {
-    return new Transformation(this.encode, this.decode)
-  }
-}
+)
 
 /**
  * Composes two schema transformations into a single bidirectional conversion.

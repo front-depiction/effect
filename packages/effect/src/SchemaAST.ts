@@ -19,6 +19,7 @@ import * as InternalAnnotations from "./internal/schema/annotations.ts"
 import { collectIssues } from "./internal/schema/checks.ts"
 import * as Machine from "./internal/schema/machine.ts"
 import * as InternalParser from "./internal/schema/parser.ts"
+import { tagged } from "./internal/schema/tagged.ts"
 import * as Pipeable from "./Pipeable.ts"
 import * as Predicate from "./Predicate.ts"
 import * as Result from "./Result.ts"
@@ -668,7 +669,9 @@ interface ASTNode {
 }
 
 abstract class ASTNodeImpl implements ASTNode {
-  readonly [TypeId] = TypeId
+  get [TypeId](): typeof TypeId {
+    return TypeId
+  }
   abstract readonly _tag: string
   /** @internal */
   abstract getParser(resolver: Machine.Resolver): Machine.Node<unknown>
@@ -753,65 +756,68 @@ export const Declaration: new(
   context?: Context,
   encodingChecks?: Checks,
   encodingRun?: DeclarationRun
-) => Declaration = class extends ASTNodeImpl {
-  readonly _tag = "Declaration"
-  readonly typeParameters: ReadonlyArray<AST>
-  readonly run: DeclarationRun
-  readonly encodingChecks: Checks | undefined
-  /**
-   * Parser factory {@link flip} swaps in, so a declaration can behave
-   * differently when encoding. `undefined` reuses `run`.
-   */
-  readonly encodingRun: DeclarationRun | undefined
+) => Declaration = tagged(
+  "Declaration",
+  class extends ASTNodeImpl {
+    declare readonly _tag: "Declaration"
+    readonly typeParameters: ReadonlyArray<AST>
+    readonly run: DeclarationRun
+    readonly encodingChecks: Checks | undefined
+    /**
+     * Parser factory {@link flip} swaps in, so a declaration can behave
+     * differently when encoding. `undefined` reuses `run`.
+     */
+    readonly encodingRun: DeclarationRun | undefined
 
-  constructor(
-    typeParameters: ReadonlyArray<AST>,
-    run: DeclarationRun,
-    annotations?: Schema.Annotations.Annotations,
-    checks?: Checks,
-    encoding?: Encoding,
-    context?: Context,
-    encodingChecks?: Checks,
-    encodingRun?: DeclarationRun
-  ) {
-    super(annotations, checks, encoding, context)
-    this.typeParameters = typeParameters
-    this.run = run
-    this.encodingChecks = encodingChecks
-    this.encodingRun = encodingRun
+    constructor(
+      typeParameters: ReadonlyArray<AST>,
+      run: DeclarationRun,
+      annotations?: Schema.Annotations.Annotations,
+      checks?: Checks,
+      encoding?: Encoding,
+      context?: Context,
+      encodingChecks?: Checks,
+      encodingRun?: DeclarationRun
+    ) {
+      super(annotations, checks, encoding, context)
+      this.typeParameters = typeParameters
+      this.run = run
+      this.encodingChecks = encodingChecks
+      this.encodingRun = encodingRun
+    }
+    /** @internal */
+    override getParser(resolver: Machine.Resolver): Machine.Node<unknown> {
+      return Machine.declarationNode(this, resolver, getConstructorDescriptor)
+    }
+    private _rebuild(
+      recur: (ast: AST) => AST,
+      checks: Checks | undefined,
+      encodingChecks: Checks | undefined,
+      run: DeclarationRun,
+      encodingRun: DeclarationRun | undefined
+    ) {
+      const tps = mapOrSame(this.typeParameters, recur)
+      return tps === this.typeParameters && checks === this.checks && encodingChecks === this.encodingChecks &&
+          run === this.run && encodingRun === this.encodingRun ?
+        this :
+        new Declaration(tps, run, this.annotations, checks, undefined, this.context, encodingChecks, encodingRun)
+    }
+    /** @internal */
+    recur(recur: (ast: AST) => AST) {
+      return this._rebuild(recur, this.checks, this.encodingChecks, this.run, this.encodingRun)
+    }
+    /** @internal */
+    flip(recur: (ast: AST) => AST) {
+      return this._rebuild(recur, this.encodingChecks, this.checks, this.encodingRun ?? this.run, this.run)
+    }
+    /** @internal */
+    getExpected(): string {
+      const expected = this.annotations?.expected
+      if (typeof expected === "string") return expected
+      return "<Declaration>"
+    }
   }
-  /** @internal */
-  override getParser(resolver: Machine.Resolver): Machine.Node<unknown> {
-    return Machine.declarationNode(this, resolver, getConstructorDescriptor)
-  }
-  private _rebuild(
-    recur: (ast: AST) => AST,
-    checks: Checks | undefined,
-    encodingChecks: Checks | undefined,
-    run: DeclarationRun,
-    encodingRun: DeclarationRun | undefined
-  ) {
-    const tps = mapOrSame(this.typeParameters, recur)
-    return tps === this.typeParameters && checks === this.checks && encodingChecks === this.encodingChecks &&
-        run === this.run && encodingRun === this.encodingRun ?
-      this :
-      new Declaration(tps, run, this.annotations, checks, undefined, this.context, encodingChecks, encodingRun)
-  }
-  /** @internal */
-  recur(recur: (ast: AST) => AST) {
-    return this._rebuild(recur, this.checks, this.encodingChecks, this.run, this.encodingRun)
-  }
-  /** @internal */
-  flip(recur: (ast: AST) => AST) {
-    return this._rebuild(recur, this.encodingChecks, this.checks, this.encodingRun ?? this.run, this.run)
-  }
-  /** @internal */
-  getExpected(): string {
-    const expected = this.annotations?.expected
-    if (typeof expected === "string") return expected
-    return "<Declaration>"
-  }
-}
+)
 
 /**
  * AST node matching the `null` literal value.
@@ -843,17 +849,20 @@ export const Null: new(
   checks?: Checks | undefined,
   encoding?: Encoding | undefined,
   context?: Context | undefined
-) => Null = class extends ASTNodeImpl {
-  readonly _tag = "Null"
-  /** @internal */
-  override getParser(): Machine.Node<unknown> {
-    return Machine.constNode(this, null)
+) => Null = tagged(
+  "Null",
+  class extends ASTNodeImpl {
+    declare readonly _tag: "Null"
+    /** @internal */
+    override getParser(): Machine.Node<unknown> {
+      return Machine.constNode(this, null)
+    }
+    /** @internal */
+    getExpected(): string {
+      return "null"
+    }
   }
-  /** @internal */
-  getExpected(): string {
-    return "null"
-  }
-}
+)
 
 const null_ = new Null()
 export {
@@ -904,21 +913,24 @@ export const Undefined: new(
   checks?: Checks | undefined,
   encoding?: Encoding | undefined,
   context?: Context | undefined
-) => Undefined = class extends ASTNodeImpl {
-  readonly _tag = "Undefined"
-  /** @internal */
-  override getParser(): Machine.Node<unknown> {
-    return Machine.constNode(this, undefined)
+) => Undefined = tagged(
+  "Undefined",
+  class extends ASTNodeImpl {
+    declare readonly _tag: "Undefined"
+    /** @internal */
+    override getParser(): Machine.Node<unknown> {
+      return Machine.constNode(this, undefined)
+    }
+    /** @internal */
+    toCodecJson(): AST {
+      return replaceEncoding(this, [undefinedToNull])
+    }
+    /** @internal */
+    getExpected(): string {
+      return "undefined"
+    }
   }
-  /** @internal */
-  toCodecJson(): AST {
-    return replaceEncoding(this, [undefinedToNull])
-  }
-  /** @internal */
-  getExpected(): string {
-    return "undefined"
-  }
-}
+)
 
 const undefinedToNull = new Link(
   null_,
@@ -985,21 +997,24 @@ export const Void: new(
   checks?: Checks | undefined,
   encoding?: Encoding | undefined,
   context?: Context | undefined
-) => Void = class extends ASTNodeImpl {
-  readonly _tag = "Void"
-  /** @internal */
-  override getParser(): Machine.Node<unknown> {
-    return Machine.voidNode(this)
+) => Void = tagged(
+  "Void",
+  class extends ASTNodeImpl {
+    declare readonly _tag: "Void"
+    /** @internal */
+    override getParser(): Machine.Node<unknown> {
+      return Machine.voidNode(this)
+    }
+    /** @internal */
+    toCodecJson(): AST {
+      return replaceEncoding(this, [undefinedToNull])
+    }
+    /** @internal */
+    getExpected(): string {
+      return "void"
+    }
   }
-  /** @internal */
-  toCodecJson(): AST {
-    return replaceEncoding(this, [undefinedToNull])
-  }
-  /** @internal */
-  getExpected(): string {
-    return "void"
-  }
-}
+)
 
 const void_ = new Void()
 export {
@@ -1057,17 +1072,20 @@ export const Never: new(
   checks?: Checks | undefined,
   encoding?: Encoding | undefined,
   context?: Context | undefined
-) => Never = class extends ASTNodeImpl {
-  readonly _tag = "Never"
-  /** @internal */
-  override getParser(): Machine.Node<unknown> {
-    return Machine.neverNode(this)
+) => Never = tagged(
+  "Never",
+  class extends ASTNodeImpl {
+    declare readonly _tag: "Never"
+    /** @internal */
+    override getParser(): Machine.Node<unknown> {
+      return Machine.neverNode(this)
+    }
+    /** @internal */
+    getExpected(): string {
+      return "never"
+    }
   }
-  /** @internal */
-  getExpected(): string {
-    return "never"
-  }
-}
+)
 
 /**
  * Provides the singleton {@link Never} AST instance.
@@ -1112,17 +1130,20 @@ export const Any: new(
   checks?: Checks | undefined,
   encoding?: Encoding | undefined,
   context?: Context | undefined
-) => Any = class extends ASTNodeImpl {
-  readonly _tag = "Any"
-  /** @internal */
-  override getParser(): Machine.Node<unknown> {
-    return Machine.anyNode(this)
+) => Any = tagged(
+  "Any",
+  class extends ASTNodeImpl {
+    declare readonly _tag: "Any"
+    /** @internal */
+    override getParser(): Machine.Node<unknown> {
+      return Machine.anyNode(this)
+    }
+    /** @internal */
+    getExpected(): string {
+      return "any"
+    }
   }
-  /** @internal */
-  getExpected(): string {
-    return "any"
-  }
-}
+)
 
 /**
  * Provides the singleton {@link Any} AST instance.
@@ -1170,17 +1191,20 @@ export const Unknown: new(
   checks?: Checks | undefined,
   encoding?: Encoding | undefined,
   context?: Context | undefined
-) => Unknown = class extends ASTNodeImpl {
-  readonly _tag = "Unknown"
-  /** @internal */
-  override getParser(): Machine.Node<unknown> {
-    return Machine.anyNode(this)
+) => Unknown = tagged(
+  "Unknown",
+  class extends ASTNodeImpl {
+    declare readonly _tag: "Unknown"
+    /** @internal */
+    override getParser(): Machine.Node<unknown> {
+      return Machine.anyNode(this)
+    }
+    /** @internal */
+    getExpected(): string {
+      return "unknown"
+    }
   }
-  /** @internal */
-  getExpected(): string {
-    return "unknown"
-  }
-}
+)
 
 /**
  * Provides the singleton {@link Unknown} AST instance.
@@ -1225,17 +1249,20 @@ export const ObjectKeyword: new(
   checks?: Checks | undefined,
   encoding?: Encoding | undefined,
   context?: Context | undefined
-) => ObjectKeyword = class extends ASTNodeImpl {
-  readonly _tag = "ObjectKeyword"
-  /** @internal */
-  override getParser(): Machine.Node<unknown> {
-    return Machine.objectKeywordNode(this)
+) => ObjectKeyword = tagged(
+  "ObjectKeyword",
+  class extends ASTNodeImpl {
+    declare readonly _tag: "ObjectKeyword"
+    /** @internal */
+    override getParser(): Machine.Node<unknown> {
+      return Machine.objectKeywordNode(this)
+    }
+    /** @internal */
+    getExpected(): string {
+      return "object | array | function"
+    }
   }
-  /** @internal */
-  getExpected(): string {
-    return "object | array | function"
-  }
-}
+)
 
 /**
  * Provides the singleton {@link ObjectKeyword} AST instance.
@@ -1298,50 +1325,53 @@ export const Enum: new(
   checks?: Checks,
   encoding?: Encoding,
   context?: Context
-) => Enum = class extends ASTNodeImpl {
-  readonly _tag = "Enum"
-  readonly enums: ReadonlyArray<readonly [string, string | number]>
+) => Enum = tagged(
+  "Enum",
+  class extends ASTNodeImpl {
+    declare readonly _tag: "Enum"
+    readonly enums: ReadonlyArray<readonly [string, string | number]>
 
-  constructor(
-    enums: ReadonlyArray<readonly [string, string | number]>,
-    annotations?: Schema.Annotations.Annotations,
-    checks?: Checks,
-    encoding?: Encoding,
-    context?: Context
-  ) {
-    super(annotations, checks, encoding, context)
-    for (const [, value] of enums) {
-      if (typeof value === "number" && !globalThis.Number.isFinite(value)) {
-        throw new Error(`A numeric enum value must be finite, got ${format(value)}`)
+    constructor(
+      enums: ReadonlyArray<readonly [string, string | number]>,
+      annotations?: Schema.Annotations.Annotations,
+      checks?: Checks,
+      encoding?: Encoding,
+      context?: Context
+    ) {
+      super(annotations, checks, encoding, context)
+      for (const [, value] of enums) {
+        if (typeof value === "number" && !globalThis.Number.isFinite(value)) {
+          throw new Error(`A numeric enum value must be finite, got ${format(value)}`)
+        }
       }
+      this.enums = enums
     }
-    this.enums = enums
-  }
-  /** @internal */
-  override getParser(): Machine.Node<unknown> {
-    return Machine.enumNode(this)
-  }
-  /** @internal */
-  toCodecStringTree(): AST {
-    if (this.enums.some(([_, v]) => typeof v === "number")) {
-      const coercions = Object.fromEntries(this.enums.map(([_, v]) => [globalThis.String(v), v]))
-      return replaceEncoding(this, [
-        new Link(
-          new Union(Object.keys(coercions).map((k) => new Literal(k))),
-          new SchemaTransformation.Transformation(
-            SchemaGetter.transform((s) => coercions[s]),
-            SchemaGetter.String()
+    /** @internal */
+    override getParser(): Machine.Node<unknown> {
+      return Machine.enumNode(this)
+    }
+    /** @internal */
+    toCodecStringTree(): AST {
+      if (this.enums.some(([_, v]) => typeof v === "number")) {
+        const coercions = Object.fromEntries(this.enums.map(([_, v]) => [globalThis.String(v), v]))
+        return replaceEncoding(this, [
+          new Link(
+            new Union(Object.keys(coercions).map((k) => new Literal(k))),
+            new SchemaTransformation.Transformation(
+              SchemaGetter.transform((s) => coercions[s]),
+              SchemaGetter.String()
+            )
           )
-        )
-      ])
+        ])
+      }
+      return this
     }
-    return this
+    /** @internal */
+    getExpected(): string {
+      return this.enums.map(([_, value]) => JSON.stringify(value)).join(" | ")
+    }
   }
-  /** @internal */
-  getExpected(): string {
-    return this.enums.map(([_, value]) => JSON.stringify(value)).join(" | ")
-  }
-}
+)
 
 type TemplateLiteralPart =
   | String
@@ -1440,58 +1470,61 @@ export const TemplateLiteral: new(
   checks?: Checks,
   encoding?: Encoding,
   context?: Context
-) => TemplateLiteral = class extends ASTNodeImpl {
-  readonly _tag = "TemplateLiteral"
-  readonly parts: ReadonlyArray<AST>
-  /** @internal */
-  readonly encodedParts: ReadonlyArray<TemplateLiteralPart>
-  /** @internal */
-  readonly literals: ReadonlyArray<string | undefined>
-  /** @internal */
-  readonly suffixLengths: ReadonlyArray<number>
+) => TemplateLiteral = tagged(
+  "TemplateLiteral",
+  class extends ASTNodeImpl {
+    declare readonly _tag: "TemplateLiteral"
+    readonly parts: ReadonlyArray<AST>
+    /** @internal */
+    readonly encodedParts: ReadonlyArray<TemplateLiteralPart>
+    /** @internal */
+    readonly literals: ReadonlyArray<string | undefined>
+    /** @internal */
+    readonly suffixLengths: ReadonlyArray<number>
 
-  constructor(
-    parts: ReadonlyArray<AST>,
-    annotations?: Schema.Annotations.Annotations,
-    checks?: Checks,
-    encoding?: Encoding,
-    context?: Context
-  ) {
-    super(annotations, checks, encoding, context)
-    const encodedParts: Array<TemplateLiteralPart> = []
-    const literals: Array<string | undefined> = []
-    const validated = new Set<AST>()
-    for (let index = 0; index < parts.length; index++) {
-      const part = parts[index]
-      if (!isTemplateLiteralPart(part, index, validated)) {
-        throw new Error(`Invalid TemplateLiteral part ${part._tag}`)
+    constructor(
+      parts: ReadonlyArray<AST>,
+      annotations?: Schema.Annotations.Annotations,
+      checks?: Checks,
+      encoding?: Encoding,
+      context?: Context
+    ) {
+      super(annotations, checks, encoding, context)
+      const encodedParts: Array<TemplateLiteralPart> = []
+      const literals: Array<string | undefined> = []
+      const validated = new Set<AST>()
+      for (let index = 0; index < parts.length; index++) {
+        const part = parts[index]
+        if (!isTemplateLiteralPart(part, index, validated)) {
+          throw new Error(`Invalid TemplateLiteral part ${part._tag}`)
+        }
+        encodedParts.push(part)
+        literals.push(part._tag === "Literal" ? globalThis.String(part.literal) : undefined)
       }
-      encodedParts.push(part)
-      literals.push(part._tag === "Literal" ? globalThis.String(part.literal) : undefined)
+      const suffixLengths = new Array<number>(encodedParts.length + 1)
+      suffixLengths[encodedParts.length] = 0
+      for (let i = encodedParts.length - 1; i >= 0; i--) {
+        suffixLengths[i] = suffixLengths[i + 1] + (literals[i]?.length ?? 0)
+      }
+      this.parts = parts
+      this.encodedParts = encodedParts
+      this.literals = literals
+      this.suffixLengths = suffixLengths
     }
-    const suffixLengths = new Array<number>(encodedParts.length + 1)
-    suffixLengths[encodedParts.length] = 0
-    for (let i = encodedParts.length - 1; i >= 0; i--) {
-      suffixLengths[i] = suffixLengths[i + 1] + (literals[i]?.length ?? 0)
+    /** @internal */
+    override getParser(resolver: Machine.Resolver): Machine.Node<unknown> {
+      return Machine.templateNode(this, resolver.node(templateLiteralCodec(this)))
     }
-    this.parts = parts
-    this.encodedParts = encodedParts
-    this.literals = literals
-    this.suffixLengths = suffixLengths
+    /** @internal */
+    getExpected(): string {
+      return "string"
+    }
+    /** @internal */
+    matchPart(s: string, options: ParseOptions): string | undefined {
+      return segmentTemplateLiteralParts(this, s, options) === undefined ? undefined : s
+    }
   }
-  /** @internal */
-  override getParser(resolver: Machine.Resolver): Machine.Node<unknown> {
-    return Machine.templateNode(this, resolver.node(templateLiteralCodec(this)))
-  }
-  /** @internal */
-  getExpected(): string {
-    return "string"
-  }
-  /** @internal */
-  matchPart(s: string, options: ParseOptions): string | undefined {
-    return segmentTemplateLiteralParts(this, s, options) === undefined ? undefined : s
-  }
-}
+)
 
 /** @internal */
 export function templateLiteralParser(parts: ReadonlyArray<AST>): Arrays {
@@ -1573,39 +1606,42 @@ export const UniqueSymbol: new(
   checks?: Checks,
   encoding?: Encoding,
   context?: Context
-) => UniqueSymbol = class extends ASTNodeImpl {
-  readonly _tag = "UniqueSymbol"
-  readonly symbol: symbol
+) => UniqueSymbol = tagged(
+  "UniqueSymbol",
+  class extends ASTNodeImpl {
+    declare readonly _tag: "UniqueSymbol"
+    readonly symbol: symbol
 
-  constructor(
-    symbol: symbol,
-    annotations?: Schema.Annotations.Annotations,
-    checks?: Checks,
-    encoding?: Encoding,
-    context?: Context
-  ) {
-    super(annotations, checks, encoding, context)
-    this.symbol = symbol
+    constructor(
+      symbol: symbol,
+      annotations?: Schema.Annotations.Annotations,
+      checks?: Checks,
+      encoding?: Encoding,
+      context?: Context
+    ) {
+      super(annotations, checks, encoding, context)
+      this.symbol = symbol
+    }
+    /** @internal */
+    override getParser(): Machine.Node<unknown> {
+      return Machine.constNode(this, this.symbol)
+    }
+    /** @internal */
+    toCodecStringTree(): AST {
+      const key = globalThis.Symbol.keyFor(this.symbol)
+      return replaceEncoding(this, [
+        new Link(
+          key === undefined ? never : new Literal(globalThis.String(this.symbol)),
+          symbolToString.transformation
+        )
+      ])
+    }
+    /** @internal */
+    getExpected(): string {
+      return globalThis.String(this.symbol)
+    }
   }
-  /** @internal */
-  override getParser(): Machine.Node<unknown> {
-    return Machine.constNode(this, this.symbol)
-  }
-  /** @internal */
-  toCodecStringTree(): AST {
-    const key = globalThis.Symbol.keyFor(this.symbol)
-    return replaceEncoding(this, [
-      new Link(
-        key === undefined ? never : new Literal(globalThis.String(this.symbol)),
-        symbolToString.transformation
-      )
-    ])
-  }
-  /** @internal */
-  getExpected(): string {
-    return globalThis.String(this.symbol)
-  }
-}
+)
 
 /**
  * The set of primitive types that can appear as a {@link Literal} value.
@@ -1672,44 +1708,47 @@ export const Literal: new(
   checks?: Checks,
   encoding?: Encoding,
   context?: Context
-) => Literal = class extends ASTNodeImpl {
-  readonly _tag = "Literal"
-  readonly literal: LiteralValue
+) => Literal = tagged(
+  "Literal",
+  class extends ASTNodeImpl {
+    declare readonly _tag: "Literal"
+    readonly literal: LiteralValue
 
-  constructor(
-    literal: LiteralValue,
-    annotations?: Schema.Annotations.Annotations,
-    checks?: Checks,
-    encoding?: Encoding,
-    context?: Context
-  ) {
-    super(annotations, checks, encoding, context)
-    if (typeof literal === "number" && !globalThis.Number.isFinite(literal)) {
-      throw new Error(`A numeric literal must be finite, got ${format(literal)}`)
+    constructor(
+      literal: LiteralValue,
+      annotations?: Schema.Annotations.Annotations,
+      checks?: Checks,
+      encoding?: Encoding,
+      context?: Context
+    ) {
+      super(annotations, checks, encoding, context)
+      if (typeof literal === "number" && !globalThis.Number.isFinite(literal)) {
+        throw new Error(`A numeric literal must be finite, got ${format(literal)}`)
+      }
+      this.literal = literal
     }
-    this.literal = literal
+    /** @internal */
+    override getParser(): Machine.Node<unknown> {
+      return Machine.constNode(this, this.literal)
+    }
+    /** @internal */
+    matchPart(s: string, _options: ParseOptions): LiteralValue | undefined {
+      return s === globalThis.String(this.literal) ? this.literal : undefined
+    }
+    /** @internal */
+    toCodecJson(): AST {
+      return typeof this.literal === "bigint" ? literalToString(this) : this
+    }
+    /** @internal */
+    toCodecStringTree(): AST {
+      return typeof this.literal === "string" ? this : literalToString(this)
+    }
+    /** @internal */
+    getExpected(): string {
+      return typeof this.literal === "string" ? JSON.stringify(this.literal) : globalThis.String(this.literal)
+    }
   }
-  /** @internal */
-  override getParser(): Machine.Node<unknown> {
-    return Machine.constNode(this, this.literal)
-  }
-  /** @internal */
-  matchPart(s: string, _options: ParseOptions): LiteralValue | undefined {
-    return s === globalThis.String(this.literal) ? this.literal : undefined
-  }
-  /** @internal */
-  toCodecJson(): AST {
-    return typeof this.literal === "bigint" ? literalToString(this) : this
-  }
-  /** @internal */
-  toCodecStringTree(): AST {
-    return typeof this.literal === "string" ? this : literalToString(this)
-  }
-  /** @internal */
-  getExpected(): string {
-    return typeof this.literal === "string" ? JSON.stringify(this.literal) : globalThis.String(this.literal)
-  }
-}
+)
 
 function literalToString(ast: Literal): Literal {
   const literalAsString = globalThis.String(ast.literal)
@@ -1754,22 +1793,25 @@ export const String: new(
   checks?: Checks | undefined,
   encoding?: Encoding | undefined,
   context?: Context | undefined
-) => String = class extends ASTNodeImpl {
-  readonly _tag = "String"
-  /** @internal */
-  override getParser(): Machine.Node<unknown> {
-    return Machine.stringNode(this)
+) => String = tagged(
+  "String",
+  class extends ASTNodeImpl {
+    declare readonly _tag: "String"
+    /** @internal */
+    override getParser(): Machine.Node<unknown> {
+      return Machine.stringNode(this)
+    }
+    /** @internal */
+    matchPart(s: string, options: ParseOptions): string | undefined {
+      const checks = this.checks
+      return checks && !options.disableChecks && collectIssues(checks, s, undefined, this, options) ? undefined : s
+    }
+    /** @internal */
+    getExpected(): string {
+      return "string"
+    }
   }
-  /** @internal */
-  matchPart(s: string, options: ParseOptions): string | undefined {
-    const checks = this.checks
-    return checks && !options.disableChecks && collectIssues(checks, s, undefined, this, options) ? undefined : s
-  }
-  /** @internal */
-  getExpected(): string {
-    return "string"
-  }
-}
+)
 
 /**
  * Provides the singleton {@link String} AST instance.
@@ -1829,31 +1871,34 @@ export const Number: new(
   checks?: Checks | undefined,
   encoding?: Encoding | undefined,
   context?: Context | undefined
-) => Number = class extends ASTNodeImpl {
-  readonly _tag = "Number"
-  /** @internal */
-  override getParser(): Machine.Node<unknown> {
-    return Machine.numberNode(this)
+) => Number = tagged(
+  "Number",
+  class extends ASTNodeImpl {
+    declare readonly _tag: "Number"
+    /** @internal */
+    override getParser(): Machine.Node<unknown> {
+      return Machine.numberNode(this)
+    }
+    /** @internal */
+    matchKey(s: string, options: ParseOptions): number | undefined {
+      return this._match(isStringNumberRegExp, s, options)
+    }
+    /** @internal */
+    matchPart(s: string, options: ParseOptions): number | undefined {
+      return this._match(isStringFiniteRegExp, s, options)
+    }
+    private _match(regexp: RegExp, s: string, options: ParseOptions): number | undefined {
+      if (!regexp.test(s)) return undefined
+      const value = globalThis.Number(s)
+      if (options.disableChecks || !this.checks) return value
+      return collectIssues(this.checks, value, undefined, this, options) ? undefined : value
+    }
+    /** @internal */
+    getExpected(): string {
+      return "number"
+    }
   }
-  /** @internal */
-  matchKey(s: string, options: ParseOptions): number | undefined {
-    return this._match(isStringNumberRegExp, s, options)
-  }
-  /** @internal */
-  matchPart(s: string, options: ParseOptions): number | undefined {
-    return this._match(isStringFiniteRegExp, s, options)
-  }
-  private _match(regexp: RegExp, s: string, options: ParseOptions): number | undefined {
-    if (!regexp.test(s)) return undefined
-    const value = globalThis.Number(s)
-    if (options.disableChecks || !this.checks) return value
-    return collectIssues(this.checks, value, undefined, this, options) ? undefined : value
-  }
-  /** @internal */
-  getExpected(): string {
-    return "number"
-  }
-}
+)
 
 function isFiniteNumber(ast: Number): boolean {
   return ast.checks !== undefined &&
@@ -1920,17 +1965,20 @@ export const Boolean: new(
   checks?: Checks | undefined,
   encoding?: Encoding | undefined,
   context?: Context | undefined
-) => Boolean = class extends ASTNodeImpl {
-  readonly _tag = "Boolean"
-  /** @internal */
-  override getParser(): Machine.Node<unknown> {
-    return Machine.booleanNode(this)
+) => Boolean = tagged(
+  "Boolean",
+  class extends ASTNodeImpl {
+    declare readonly _tag: "Boolean"
+    /** @internal */
+    override getParser(): Machine.Node<unknown> {
+      return Machine.booleanNode(this)
+    }
+    /** @internal */
+    getExpected(): string {
+      return "boolean"
+    }
   }
-  /** @internal */
-  getExpected(): string {
-    return "boolean"
-  }
-}
+)
 
 /**
  * Provides the singleton {@link Boolean} AST instance.
@@ -1990,26 +2038,29 @@ export const Symbol: new(
   checks?: Checks | undefined,
   encoding?: Encoding | undefined,
   context?: Context | undefined
-) => Symbol = class extends ASTNodeImpl {
-  readonly _tag = "Symbol"
-  /** @internal */
-  override getParser(): Machine.Node<unknown> {
-    return Machine.symbolNode(this)
+) => Symbol = tagged(
+  "Symbol",
+  class extends ASTNodeImpl {
+    declare readonly _tag: "Symbol"
+    /** @internal */
+    override getParser(): Machine.Node<unknown> {
+      return Machine.symbolNode(this)
+    }
+    /** @internal */
+    matchKey(s: symbol, options: ParseOptions): symbol | undefined {
+      if (options.disableChecks || !this.checks) return s
+      return collectIssues(this.checks, s, undefined, this, options) ? undefined : s
+    }
+    /** @internal */
+    toCodecStringTree(): AST {
+      return replaceEncoding(this, [symbolToString])
+    }
+    /** @internal */
+    getExpected(): string {
+      return "symbol"
+    }
   }
-  /** @internal */
-  matchKey(s: symbol, options: ParseOptions): symbol | undefined {
-    if (options.disableChecks || !this.checks) return s
-    return collectIssues(this.checks, s, undefined, this, options) ? undefined : s
-  }
-  /** @internal */
-  toCodecStringTree(): AST {
-    return replaceEncoding(this, [symbolToString])
-  }
-  /** @internal */
-  getExpected(): string {
-    return "symbol"
-  }
-}
+)
 
 /**
  * Provides the singleton {@link Symbol} AST instance.
@@ -2068,28 +2119,31 @@ export const BigInt: new(
   checks?: Checks | undefined,
   encoding?: Encoding | undefined,
   context?: Context | undefined
-) => BigInt = class extends ASTNodeImpl {
-  readonly _tag = "BigInt"
-  /** @internal */
-  override getParser(): Machine.Node<unknown> {
-    return Machine.bigintNode(this)
+) => BigInt = tagged(
+  "BigInt",
+  class extends ASTNodeImpl {
+    declare readonly _tag: "BigInt"
+    /** @internal */
+    override getParser(): Machine.Node<unknown> {
+      return Machine.bigintNode(this)
+    }
+    /** @internal */
+    matchPart(s: string, options: ParseOptions): bigint | undefined {
+      if (!isStringBigIntRegExp.test(s)) return undefined
+      const value = globalThis.BigInt(s)
+      if (options.disableChecks || !this.checks) return value
+      return collectIssues(this.checks, value, undefined, this, options) ? undefined : value
+    }
+    /** @internal */
+    toCodecStringTree(): AST {
+      return replaceEncoding(this, [bigIntToString])
+    }
+    /** @internal */
+    getExpected(): string {
+      return "bigint"
+    }
   }
-  /** @internal */
-  matchPart(s: string, options: ParseOptions): bigint | undefined {
-    if (!isStringBigIntRegExp.test(s)) return undefined
-    const value = globalThis.BigInt(s)
-    if (options.disableChecks || !this.checks) return value
-    return collectIssues(this.checks, value, undefined, this, options) ? undefined : value
-  }
-  /** @internal */
-  toCodecStringTree(): AST {
-    return replaceEncoding(this, [bigIntToString])
-  }
-  /** @internal */
-  getExpected(): string {
-    return "bigint"
-  }
-}
+)
 
 /**
  * Provides the singleton {@link BigInt} AST instance.
@@ -2181,82 +2235,85 @@ export const Arrays: new(
   encoding?: Encoding,
   context?: Context,
   encodingChecks?: Checks
-) => Arrays = class extends ASTNodeImpl {
-  readonly _tag = "Arrays"
-  readonly isMutable: boolean
-  readonly elements: ReadonlyArray<AST>
-  readonly rest: ReadonlyArray<AST>
-  readonly encodingChecks: Checks | undefined
+) => Arrays = tagged(
+  "Arrays",
+  class extends ASTNodeImpl {
+    declare readonly _tag: "Arrays"
+    readonly isMutable: boolean
+    readonly elements: ReadonlyArray<AST>
+    readonly rest: ReadonlyArray<AST>
+    readonly encodingChecks: Checks | undefined
 
-  constructor(
-    isMutable: boolean,
-    elements: ReadonlyArray<AST>,
-    rest: ReadonlyArray<AST>,
-    annotations?: Schema.Annotations.Annotations,
-    checks?: Checks,
-    encoding?: Encoding,
-    context?: Context,
-    encodingChecks?: Checks
-  ) {
-    super(annotations, checks, encoding, context)
-    this.isMutable = isMutable
-    this.elements = elements
-    this.rest = rest
-    this.encodingChecks = encodingChecks
+    constructor(
+      isMutable: boolean,
+      elements: ReadonlyArray<AST>,
+      rest: ReadonlyArray<AST>,
+      annotations?: Schema.Annotations.Annotations,
+      checks?: Checks,
+      encoding?: Encoding,
+      context?: Context,
+      encodingChecks?: Checks
+    ) {
+      super(annotations, checks, encoding, context)
+      this.isMutable = isMutable
+      this.elements = elements
+      this.rest = rest
+      this.encodingChecks = encodingChecks
 
-    let hasOptional = false
-    for (let i = 0; i < elements.length; i++) {
-      if (isOptional(elements[i])) {
-        hasOptional = true
-      } else if (hasOptional) {
+      let hasOptional = false
+      for (let i = 0; i < elements.length; i++) {
+        if (isOptional(elements[i])) {
+          hasOptional = true
+        } else if (hasOptional) {
+          throw new Error("A required element cannot follow an optional element. ts(1257)")
+        }
+      }
+      if (hasOptional && rest.length > 1) {
         throw new Error("A required element cannot follow an optional element. ts(1257)")
       }
-    }
-    if (hasOptional && rest.length > 1) {
-      throw new Error("A required element cannot follow an optional element. ts(1257)")
-    }
 
-    // An optional element cannot follow a rest element.ts(1266)
-    for (let i = 1; i < rest.length; i++) {
-      if (isOptional(rest[i])) {
-        throw new Error("An optional element cannot follow a rest element. ts(1266)")
+      // An optional element cannot follow a rest element.ts(1266)
+      for (let i = 1; i < rest.length; i++) {
+        if (isOptional(rest[i])) {
+          throw new Error("An optional element cannot follow a rest element. ts(1266)")
+        }
       }
     }
+    /** @internal */
+    override getParser(resolver: Machine.Resolver): Machine.Node<unknown> {
+      return Machine.arraysNode(this, resolver)
+    }
+    private _rebuild(recur: (ast: AST) => AST, checks: Checks | undefined, encodingChecks: Checks | undefined) {
+      const elements = mapOrSame(this.elements, recur)
+      const rest = mapOrSame(this.rest, recur)
+      return elements === this.elements && rest === this.rest && checks === this.checks &&
+          encodingChecks === this.encodingChecks ?
+        this :
+        new Arrays(
+          this.isMutable,
+          elements,
+          rest,
+          this.annotations,
+          checks,
+          undefined,
+          this.context,
+          encodingChecks
+        )
+    }
+    /** @internal */
+    recur(recur: (ast: AST) => AST) {
+      return this._rebuild(recur, this.checks, this.encodingChecks)
+    }
+    /** @internal */
+    flip(recur: (ast: AST) => AST) {
+      return this._rebuild(recur, this.encodingChecks, this.checks)
+    }
+    /** @internal */
+    getExpected(): string {
+      return "array"
+    }
   }
-  /** @internal */
-  override getParser(resolver: Machine.Resolver): Machine.Node<unknown> {
-    return Machine.arraysNode(this, resolver)
-  }
-  private _rebuild(recur: (ast: AST) => AST, checks: Checks | undefined, encodingChecks: Checks | undefined) {
-    const elements = mapOrSame(this.elements, recur)
-    const rest = mapOrSame(this.rest, recur)
-    return elements === this.elements && rest === this.rest && checks === this.checks &&
-        encodingChecks === this.encodingChecks ?
-      this :
-      new Arrays(
-        this.isMutable,
-        elements,
-        rest,
-        this.annotations,
-        checks,
-        undefined,
-        this.context,
-        encodingChecks
-      )
-  }
-  /** @internal */
-  recur(recur: (ast: AST) => AST) {
-    return this._rebuild(recur, this.checks, this.encodingChecks)
-  }
-  /** @internal */
-  flip(recur: (ast: AST) => AST) {
-    return this._rebuild(recur, this.encodingChecks, this.checks)
-  }
-  /** @internal */
-  getExpected(): string {
-    return "array"
-  }
-}
+)
 
 /**
  * floating point or integer, with optional exponent
@@ -2517,79 +2574,82 @@ export const Objects: new(
   encoding?: Encoding,
   context?: Context,
   encodingChecks?: Checks
-) => Objects = class extends ASTNodeImpl {
-  readonly _tag = "Objects"
-  readonly propertySignatures: ReadonlyArray<PropertySignature>
-  readonly indexSignatures: ReadonlyArray<IndexSignature>
-  readonly encodingChecks: Checks | undefined
+) => Objects = tagged(
+  "Objects",
+  class extends ASTNodeImpl {
+    declare readonly _tag: "Objects"
+    readonly propertySignatures: ReadonlyArray<PropertySignature>
+    readonly indexSignatures: ReadonlyArray<IndexSignature>
+    readonly encodingChecks: Checks | undefined
 
-  constructor(
-    propertySignatures: ReadonlyArray<PropertySignature>,
-    indexSignatures: ReadonlyArray<IndexSignature>,
-    annotations?: Schema.Annotations.Annotations,
-    checks?: Checks,
-    encoding?: Encoding,
-    context?: Context,
-    encodingChecks?: Checks
-  ) {
-    super(annotations, checks, encoding, context)
-    this.propertySignatures = propertySignatures
-    this.indexSignatures = indexSignatures
-    this.encodingChecks = encodingChecks
-  }
-  /** @internal */
-  override getParser(resolver: Machine.Resolver): Machine.Node<unknown> {
-    const indexSignatures = this.indexSignatures
-    return indexSignatures.length > 0
-      ? indexSignatures[0].getRecordNode(this, resolver)
-      : Machine.objectsNode(this, resolver)
-  }
-  private _rebuild(
-    recur: (ast: AST) => AST,
-    recurParameter: (ast: AST) => AST,
-    checks: Checks | undefined,
-    encodingChecks: Checks | undefined
-  ): Objects {
-    const props = mapOrSame(this.propertySignatures, (ps) => {
-      const t = recur(ps.type)
-      return t === ps.type ? ps : new PropertySignature(ps.name, t)
-    })
+    constructor(
+      propertySignatures: ReadonlyArray<PropertySignature>,
+      indexSignatures: ReadonlyArray<IndexSignature>,
+      annotations?: Schema.Annotations.Annotations,
+      checks?: Checks,
+      encoding?: Encoding,
+      context?: Context,
+      encodingChecks?: Checks
+    ) {
+      super(annotations, checks, encoding, context)
+      this.propertySignatures = propertySignatures
+      this.indexSignatures = indexSignatures
+      this.encodingChecks = encodingChecks
+    }
+    /** @internal */
+    override getParser(resolver: Machine.Resolver): Machine.Node<unknown> {
+      const indexSignatures = this.indexSignatures
+      return indexSignatures.length > 0
+        ? indexSignatures[0].getRecordNode(this, resolver)
+        : Machine.objectsNode(this, resolver)
+    }
+    private _rebuild(
+      recur: (ast: AST) => AST,
+      recurParameter: (ast: AST) => AST,
+      checks: Checks | undefined,
+      encodingChecks: Checks | undefined
+    ): Objects {
+      const props = mapOrSame(this.propertySignatures, (ps) => {
+        const t = recur(ps.type)
+        return t === ps.type ? ps : new PropertySignature(ps.name, t)
+      })
 
-    const indexes = mapOrSame(this.indexSignatures, (is) => {
-      const p = recurParameter(is.parameter)
-      const t = recur(is.type)
-      return p === is.parameter && t === is.type
-        ? is
-        : is.rebuild(p, t)
-    })
+      const indexes = mapOrSame(this.indexSignatures, (is) => {
+        const p = recurParameter(is.parameter)
+        const t = recur(is.type)
+        return p === is.parameter && t === is.type
+          ? is
+          : is.rebuild(p, t)
+      })
 
-    return props === this.propertySignatures && indexes === this.indexSignatures && checks === this.checks &&
-        encodingChecks === this.encodingChecks
-      ? this
-      : new Objects(
-        props,
-        indexes,
-        this.annotations,
-        checks,
-        undefined,
-        this.context,
-        encodingChecks
-      )
+      return props === this.propertySignatures && indexes === this.indexSignatures && checks === this.checks &&
+          encodingChecks === this.encodingChecks
+        ? this
+        : new Objects(
+          props,
+          indexes,
+          this.annotations,
+          checks,
+          undefined,
+          this.context,
+          encodingChecks
+        )
+    }
+    /** @internal */
+    flip(recur: (ast: AST) => AST): AST {
+      return this._rebuild(recur, recur, this.encodingChecks, this.checks)
+    }
+    /** @internal */
+    recur(recur: (ast: AST) => AST, recurParameter: (ast: AST) => AST = recur): AST {
+      return this._rebuild(recur, recurParameter, this.checks, this.encodingChecks)
+    }
+    /** @internal */
+    getExpected(): string {
+      if (this.propertySignatures.length === 0 && this.indexSignatures.length === 0) return "object | array"
+      return "object"
+    }
   }
-  /** @internal */
-  flip(recur: (ast: AST) => AST): AST {
-    return this._rebuild(recur, recur, this.encodingChecks, this.checks)
-  }
-  /** @internal */
-  recur(recur: (ast: AST) => AST, recurParameter: (ast: AST) => AST = recur): AST {
-    return this._rebuild(recur, recurParameter, this.checks, this.encodingChecks)
-  }
-  /** @internal */
-  getExpected(): string {
-    if (this.propertySignatures.length === 0 && this.indexSignatures.length === 0) return "object | array"
-    return "object"
-  }
-}
+)
 
 function combineChecks(a: Checks | undefined, b: Checks | undefined): Checks | undefined {
   if (!a) return b
@@ -3049,94 +3109,97 @@ export const Union: new<A extends AST = AST>(
   encoding?: Encoding,
   context?: Context,
   encodingChecks?: Checks
-) => Union<A> = class<A extends AST = AST> extends ASTNodeImpl {
-  readonly _tag = "Union"
-  readonly types: ReadonlyArray<A>
-  readonly options: UnionOptions | undefined
-  readonly encodingChecks: Checks | undefined
+) => Union<A> = tagged(
+  "Union",
+  class<A extends AST = AST> extends ASTNodeImpl {
+    declare readonly _tag: "Union"
+    readonly types: ReadonlyArray<A>
+    readonly options: UnionOptions | undefined
+    readonly encodingChecks: Checks | undefined
 
-  constructor(
-    types: ReadonlyArray<A>,
-    options?: UnionOptions,
-    annotations?: Schema.Annotations.Annotations,
-    checks?: Checks,
-    encoding?: Encoding,
-    context?: Context,
-    encodingChecks?: Checks
-  ) {
-    super(annotations, checks, encoding, context)
-    this.types = types
-    this.options = options
-    this.encodingChecks = encodingChecks
-  }
-  /** @internal */
-  override getParser(resolver: Machine.Resolver): Machine.Node<unknown> {
-    return Machine.unionNode(this, resolver, getCandidateIndex)
-  }
-  private _rebuild(
-    recur: (ast: AST) => AST,
-    checks: Checks | undefined,
-    encodingChecks: Checks | undefined
-  ): Union<AST> {
-    const types = mapOrSame(this.types, recur)
-    return types === this.types && checks === this.checks && encodingChecks === this.encodingChecks ?
-      this :
-      new Union(types, this.options, this.annotations, checks, undefined, this.context, encodingChecks)
-  }
-  /** @internal */
-  recur(recur: (ast: AST) => AST): Union<AST> {
-    return this._rebuild(recur, this.checks, this.encodingChecks)
-  }
-  /** @internal */
-  flip(recur: (ast: AST) => AST): Union<AST> {
-    return this._rebuild(recur, this.encodingChecks, this.checks)
-  }
-  /** @internal */
-  matchPart(s: string, options: ParseOptions): LiteralValue | undefined {
-    for (const type of this.types) {
-      const out = (type as TemplateLiteralPart).matchPart(s, options)
-      if (out !== undefined) return out
+    constructor(
+      types: ReadonlyArray<A>,
+      options?: UnionOptions,
+      annotations?: Schema.Annotations.Annotations,
+      checks?: Checks,
+      encoding?: Encoding,
+      context?: Context,
+      encodingChecks?: Checks
+    ) {
+      super(annotations, checks, encoding, context)
+      this.types = types
+      this.options = options
+      this.encodingChecks = encodingChecks
     }
-    return undefined
-  }
-  /** @internal */
-  getExpected(getExpected: (ast: AST) => string): string {
-    const expected = this.annotations?.expected
-    if (typeof expected === "string") return expected
-
-    if (this.types.length === 0) return "never"
-
-    const types = this.types.map((type) => {
-      const encoded = toEncoded(type)
-      switch (encoded._tag) {
-        case "Arrays": {
-          const literals = encoded.elements.filter(isLiteral)
-          if (literals.length > 0) {
-            return `${formatIsMutable(encoded.isMutable)}[ ${
-              literals.map((e) => getExpected(e) + formatIsOptional(e.context?.isOptional)).join(", ")
-            }, ... ]`
-          }
-          break
-        }
-        case "Objects": {
-          const literals = encoded.propertySignatures.filter((ps) => isLiteral(ps.type))
-          if (literals.length > 0) {
-            return `{ ${
-              literals.map((ps) =>
-                `${formatIsMutable(ps.type.context?.isMutable)}${formatPropertyKey(ps.name)}${
-                  formatIsOptional(ps.type.context?.isOptional)
-                }: ${getExpected(ps.type)}`
-              ).join(", ")
-            }, ... }`
-          }
-          break
-        }
+    /** @internal */
+    override getParser(resolver: Machine.Resolver): Machine.Node<unknown> {
+      return Machine.unionNode(this, resolver, getCandidateIndex)
+    }
+    private _rebuild(
+      recur: (ast: AST) => AST,
+      checks: Checks | undefined,
+      encodingChecks: Checks | undefined
+    ): Union<AST> {
+      const types = mapOrSame(this.types, recur)
+      return types === this.types && checks === this.checks && encodingChecks === this.encodingChecks ?
+        this :
+        new Union(types, this.options, this.annotations, checks, undefined, this.context, encodingChecks)
+    }
+    /** @internal */
+    recur(recur: (ast: AST) => AST): Union<AST> {
+      return this._rebuild(recur, this.checks, this.encodingChecks)
+    }
+    /** @internal */
+    flip(recur: (ast: AST) => AST): Union<AST> {
+      return this._rebuild(recur, this.encodingChecks, this.checks)
+    }
+    /** @internal */
+    matchPart(s: string, options: ParseOptions): LiteralValue | undefined {
+      for (const type of this.types) {
+        const out = (type as TemplateLiteralPart).matchPart(s, options)
+        if (out !== undefined) return out
       }
-      return getExpected(encoded)
-    })
-    return Array.from(new Set(types)).join(" | ")
+      return undefined
+    }
+    /** @internal */
+    getExpected(getExpected: (ast: AST) => string): string {
+      const expected = this.annotations?.expected
+      if (typeof expected === "string") return expected
+
+      if (this.types.length === 0) return "never"
+
+      const types = this.types.map((type) => {
+        const encoded = toEncoded(type)
+        switch (encoded._tag) {
+          case "Arrays": {
+            const literals = encoded.elements.filter(isLiteral)
+            if (literals.length > 0) {
+              return `${formatIsMutable(encoded.isMutable)}[ ${
+                literals.map((e) => getExpected(e) + formatIsOptional(e.context?.isOptional)).join(", ")
+              }, ... ]`
+            }
+            break
+          }
+          case "Objects": {
+            const literals = encoded.propertySignatures.filter((ps) => isLiteral(ps.type))
+            if (literals.length > 0) {
+              return `{ ${
+                literals.map((ps) =>
+                  `${formatIsMutable(ps.type.context?.isMutable)}${formatPropertyKey(ps.name)}${
+                    formatIsOptional(ps.type.context?.isOptional)
+                  }: ${getExpected(ps.type)}`
+                ).join(", ")
+              }, ... }`
+            }
+            break
+          }
+        }
+        return getExpected(encoded)
+      })
+      return Array.from(new Set(types)).join(" | ")
+    }
   }
-}
+)
 
 const nonFiniteLiterals = new Union([
   new Literal("Infinity"),
@@ -3206,43 +3269,46 @@ export const Suspend: new(
   checks?: Checks,
   encoding?: Encoding,
   context?: Context
-) => Suspend = class extends ASTNodeImpl {
-  readonly _tag = "Suspend"
-  readonly thunk: () => AST
+) => Suspend = tagged(
+  "Suspend",
+  class extends ASTNodeImpl {
+    declare readonly _tag: "Suspend"
+    readonly thunk: () => AST
 
-  constructor(
-    thunk: () => AST,
-    annotations?: Schema.Annotations.Annotations,
-    checks?: Checks,
-    encoding?: Encoding,
-    context?: Context
-  ) {
-    if (checks) {
-      throw new Error("Cannot add checks to Suspend")
+    constructor(
+      thunk: () => AST,
+      annotations?: Schema.Annotations.Annotations,
+      checks?: Checks,
+      encoding?: Encoding,
+      context?: Context
+    ) {
+      if (checks) {
+        throw new Error("Cannot add checks to Suspend")
+      }
+      super(annotations, undefined, encoding, context)
+      let ast: AST
+      this.thunk = () => ast ??= thunk()
     }
-    super(annotations, undefined, encoding, context)
-    let ast: AST
-    this.thunk = () => ast ??= thunk()
+    /** @internal */
+    override getParser(resolver: Machine.Resolver): Machine.Node<unknown> {
+      return Machine.suspendNode(this, resolver)
+    }
+    /** @internal */
+    recur(recur: (ast: AST) => AST) {
+      return new Suspend(
+        () => recur(this.thunk()),
+        this.annotations,
+        undefined,
+        undefined,
+        this.context
+      )
+    }
+    /** @internal */
+    getExpected(getExpected: (ast: AST) => string): string {
+      return getExpected(this.thunk())
+    }
   }
-  /** @internal */
-  override getParser(resolver: Machine.Resolver): Machine.Node<unknown> {
-    return Machine.suspendNode(this, resolver)
-  }
-  /** @internal */
-  recur(recur: (ast: AST) => AST) {
-    return new Suspend(
-      () => recur(this.thunk()),
-      this.annotations,
-      undefined,
-      undefined,
-      this.context
-    )
-  }
-  /** @internal */
-  getExpected(getExpected: (ast: AST) => string): string {
-    return getExpected(this.thunk())
-  }
-}
+)
 
 // -----------------------------------------------------------------------------
 // Checks
@@ -3294,39 +3360,42 @@ export const Filter: new<E>(
    * Whether the parsing process should be aborted after this check has failed.
    */
   aborted?: boolean
-) => Filter<E> = class<in E> extends Pipeable.Class {
-  readonly _tag = "Filter"
-  readonly run: (input: E, self: AST, options: ParseOptions) => SchemaIssue.Issue | undefined
-  readonly annotations: Schema.Annotations.Filter | undefined
-  /**
-   * Whether the parsing process should be aborted after this check has failed.
-   */
-  readonly aborted: boolean
-
-  constructor(
-    run: (input: E, self: AST, options: ParseOptions) => SchemaIssue.Issue | undefined,
-    annotations: Schema.Annotations.Filter | undefined = undefined,
+) => Filter<E> = tagged(
+  "Filter",
+  class<in E> extends Pipeable.Class {
+    declare readonly _tag: "Filter"
+    readonly run: (input: E, self: AST, options: ParseOptions) => SchemaIssue.Issue | undefined
+    readonly annotations: Schema.Annotations.Filter | undefined
     /**
      * Whether the parsing process should be aborted after this check has failed.
      */
-    aborted: boolean = false
-  ) {
-    super()
-    this.run = run
-    this.annotations = annotations
-    this.aborted = aborted
+    readonly aborted: boolean
+
+    constructor(
+      run: (input: E, self: AST, options: ParseOptions) => SchemaIssue.Issue | undefined,
+      annotations: Schema.Annotations.Filter | undefined = undefined,
+      /**
+       * Whether the parsing process should be aborted after this check has failed.
+       */
+      aborted: boolean = false
+    ) {
+      super()
+      this.run = run
+      this.annotations = annotations
+      this.aborted = aborted
+    }
+    annotate(annotations: Schema.Annotations.Filter): Filter<E> {
+      return new Filter(this.run, { ...this.annotations, ...annotations }, this.aborted)
+    }
+    abort(): Filter<E> {
+      return new Filter(this.run, this.annotations, true)
+    }
+    and(other: Check<E>, annotations?: Schema.Annotations.Filter): FilterGroup<E>
+    and(other: Check<E>, annotations?: Schema.Annotations.Filter): FilterGroup<E> {
+      return new FilterGroup([this, other], annotations)
+    }
   }
-  annotate(annotations: Schema.Annotations.Filter): Filter<E> {
-    return new Filter(this.run, { ...this.annotations, ...annotations }, this.aborted)
-  }
-  abort(): Filter<E> {
-    return new Filter(this.run, this.annotations, true)
-  }
-  and(other: Check<E>, annotations?: Schema.Annotations.Filter): FilterGroup<E>
-  and(other: Check<E>, annotations?: Schema.Annotations.Filter): FilterGroup<E> {
-    return new FilterGroup([this, other], annotations)
-  }
-}
+)
 
 /**
  * Represents a composite validation check grouping multiple {@link Check} values.
@@ -3365,27 +3434,30 @@ export const FilterGroup: new<E>(
     ...Array<Check<E>>
   ],
   annotations?: Schema.Annotations.Filter | undefined
-) => FilterGroup<E> = class<in E> extends Pipeable.Class {
-  readonly _tag = "FilterGroup"
-  readonly checks: readonly [Check<E>, ...Array<Check<E>>]
-  readonly annotations: Schema.Annotations.Filter | undefined
+) => FilterGroup<E> = tagged(
+  "FilterGroup",
+  class<in E> extends Pipeable.Class {
+    declare readonly _tag: "FilterGroup"
+    readonly checks: readonly [Check<E>, ...Array<Check<E>>]
+    readonly annotations: Schema.Annotations.Filter | undefined
 
-  constructor(
-    checks: readonly [Check<E>, ...Array<Check<E>>],
-    annotations: Schema.Annotations.Filter | undefined = undefined
-  ) {
-    super()
-    this.checks = checks
-    this.annotations = annotations
+    constructor(
+      checks: readonly [Check<E>, ...Array<Check<E>>],
+      annotations: Schema.Annotations.Filter | undefined = undefined
+    ) {
+      super()
+      this.checks = checks
+      this.annotations = annotations
+    }
+    annotate(annotations: Schema.Annotations.Filter): FilterGroup<E> {
+      return new FilterGroup(this.checks, { ...this.annotations, ...annotations })
+    }
+    and(other: Check<E>, annotations?: Schema.Annotations.Filter): FilterGroup<E>
+    and(other: Check<E>, annotations?: Schema.Annotations.Filter): FilterGroup<E> {
+      return new FilterGroup([this, other], annotations)
+    }
   }
-  annotate(annotations: Schema.Annotations.Filter): FilterGroup<E> {
-    return new FilterGroup(this.checks, { ...this.annotations, ...annotations })
-  }
-  and(other: Check<E>, annotations?: Schema.Annotations.Filter): FilterGroup<E>
-  and(other: Check<E>, annotations?: Schema.Annotations.Filter): FilterGroup<E> {
-    return new FilterGroup([this, other], annotations)
-  }
-}
+)
 
 /**
  * A validation check — either a single {@link Filter} or a composite

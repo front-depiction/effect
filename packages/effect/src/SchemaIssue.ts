@@ -13,6 +13,7 @@ import * as Arr from "./Array.ts"
 import { format, formatPath, type Formatter as FormatterI } from "./Formatter.ts"
 import * as InternalAnnotations from "./internal/schema/annotations.ts"
 import * as InternalParser from "./internal/schema/parser.ts"
+import { tagged } from "./internal/schema/tagged.ts"
 import { hasProperty } from "./Predicate.ts"
 import type * as Schema from "./Schema.ts"
 import type * as SchemaAST from "./SchemaAST.ts"
@@ -158,7 +159,9 @@ interface IssueNode {
 }
 
 class IssueNodeImpl implements IssueNode {
-  readonly [TypeId] = TypeId
+  get [TypeId](): typeof TypeId {
+    return TypeId
+  }
   /**
    * The input reported by the schema parser, when input reporting is enabled
    * and the issue is associated with a present value.
@@ -247,41 +250,44 @@ export const Filter: new(
    * The effective parse options controlling input retention.
    */
   options?: SchemaAST.ParseOptions
-) => Filter = class extends IssueNodeImpl {
-  readonly _tag = "Filter"
-  /**
-   * The filter that failed.
-   */
-  readonly filter: SchemaAST.Filter<unknown>
-  /**
-   * The issue that occurred.
-   */
-  readonly issue: Issue
-
-  constructor(
+) => Filter = tagged(
+  "Filter",
+  class extends IssueNodeImpl {
+    declare readonly _tag: "Filter"
     /**
      * The filter that failed.
      */
-    filter: SchemaAST.Filter<any>,
+    readonly filter: SchemaAST.Filter<unknown>
     /**
      * The issue that occurred.
      */
-    issue: Issue,
-    /**
-     * The present input associated with the issue. It is retained only when
-     * `options.reportInput` is `true`.
-     */
-    input?: unknown,
-    /**
-     * The effective parse options controlling input retention.
-     */
-    options?: SchemaAST.ParseOptions
-  ) {
-    super(input, options)
-    this.filter = filter
-    this.issue = issue
+    readonly issue: Issue
+
+    constructor(
+      /**
+       * The filter that failed.
+       */
+      filter: SchemaAST.Filter<any>,
+      /**
+       * The issue that occurred.
+       */
+      issue: Issue,
+      /**
+       * The present input associated with the issue. It is retained only when
+       * `options.reportInput` is `true`.
+       */
+      input?: unknown,
+      /**
+       * The effective parse options controlling input retention.
+       */
+      options?: SchemaAST.ParseOptions
+    ) {
+      super(input, options)
+      this.filter = filter
+      this.issue = issue
+    }
   }
-}
+)
 
 /**
  * Represents a schema issue produced when a schema transformation (encode/decode step) fails.
@@ -325,41 +331,44 @@ export const Encoding: new(
   issue: Issue,
   input?: unknown,
   options?: SchemaAST.ParseOptions
-) => Encoding = class extends IssueNodeImpl {
-  readonly _tag = "Encoding"
-  /**
-   * The schema that caused the issue.
-   */
-  readonly ast: SchemaAST.AST
-  /**
-   * The issue that occurred.
-   */
-  readonly issue: Issue
-
-  constructor(
+) => Encoding = tagged(
+  "Encoding",
+  class extends IssueNodeImpl {
+    declare readonly _tag: "Encoding"
     /**
      * The schema that caused the issue.
      */
-    ast: SchemaAST.AST,
+    readonly ast: SchemaAST.AST
     /**
      * The issue that occurred.
      */
-    issue: Issue,
-    /**
-     * The present input associated with the issue. It is retained only when
-     * `options.reportInput` is `true`.
-     */
-    input?: unknown,
-    /**
-     * The effective parse options controlling input retention.
-     */
-    options?: SchemaAST.ParseOptions
-  ) {
-    super(input, options)
-    this.ast = ast
-    this.issue = issue
+    readonly issue: Issue
+
+    constructor(
+      /**
+       * The schema that caused the issue.
+       */
+      ast: SchemaAST.AST,
+      /**
+       * The issue that occurred.
+       */
+      issue: Issue,
+      /**
+       * The present input associated with the issue. It is retained only when
+       * `options.reportInput` is `true`.
+       */
+      input?: unknown,
+      /**
+       * The effective parse options controlling input retention.
+       */
+      options?: SchemaAST.ParseOptions
+    ) {
+      super(input, options)
+      this.ast = ast
+      this.issue = issue
+    }
   }
-}
+)
 
 /**
  * Wraps an inner {@link Issue} with a property-key path, indicating *where* in
@@ -399,32 +408,35 @@ export interface Pointer extends IssueNode {
  * @category constructors
  * @since 4.0.0
  */
-export const Pointer: new(path: ReadonlyArray<PropertyKey>, issue: Issue) => Pointer = class extends IssueNodeImpl {
-  readonly _tag = "Pointer"
-  /**
-   * The path to the location in the input that caused the issue.
-   */
-  readonly path: ReadonlyArray<PropertyKey>
-  /**
-   * The issue that occurred.
-   */
-  readonly issue: Issue
-
-  constructor(
+export const Pointer: new(path: ReadonlyArray<PropertyKey>, issue: Issue) => Pointer = tagged(
+  "Pointer",
+  class extends IssueNodeImpl {
+    declare readonly _tag: "Pointer"
     /**
      * The path to the location in the input that caused the issue.
      */
-    path: ReadonlyArray<PropertyKey>,
+    readonly path: ReadonlyArray<PropertyKey>
     /**
      * The issue that occurred.
      */
-    issue: Issue
-  ) {
-    super()
-    this.path = path
-    this.issue = issue
+    readonly issue: Issue
+
+    constructor(
+      /**
+       * The path to the location in the input that caused the issue.
+       */
+      path: ReadonlyArray<PropertyKey>,
+      /**
+       * The issue that occurred.
+       */
+      issue: Issue
+    ) {
+      super()
+      this.path = path
+      this.issue = issue
+    }
   }
-}
+)
 
 /**
  * Represents a schema issue produced when a required key or tuple index is missing from the input.
@@ -457,25 +469,26 @@ export interface MissingKey extends IssueNode {
  * @category constructors
  * @since 4.0.0
  */
-export const MissingKey: new(annotations: Schema.Annotations.Key<unknown> | undefined) => MissingKey = class
-  extends IssueNodeImpl
-{
-  readonly _tag = "MissingKey"
-  /**
-   * The metadata for the issue.
-   */
-  readonly annotations: Schema.Annotations.Key<unknown> | undefined
-
-  constructor(
+export const MissingKey: new(annotations: Schema.Annotations.Key<unknown> | undefined) => MissingKey = tagged(
+  "MissingKey",
+  class extends IssueNodeImpl {
+    declare readonly _tag: "MissingKey"
     /**
      * The metadata for the issue.
      */
-    annotations: Schema.Annotations.Key<unknown> | undefined
-  ) {
-    super()
-    this.annotations = annotations
+    readonly annotations: Schema.Annotations.Key<unknown> | undefined
+
+    constructor(
+      /**
+       * The metadata for the issue.
+       */
+      annotations: Schema.Annotations.Key<unknown> | undefined
+    ) {
+      super()
+      this.annotations = annotations
+    }
   }
-}
+)
 
 /**
  * Represents a schema issue produced when an input object or tuple contains a key/index not
@@ -517,31 +530,34 @@ export const UnexpectedKey: new(
   ast: SchemaAST.AST,
   input?: unknown,
   options?: SchemaAST.ParseOptions
-) => UnexpectedKey = class extends IssueNodeImpl {
-  readonly _tag = "UnexpectedKey"
-  /**
-   * The schema that caused the issue.
-   */
-  readonly ast: SchemaAST.AST
-  constructor(
+) => UnexpectedKey = tagged(
+  "UnexpectedKey",
+  class extends IssueNodeImpl {
+    declare readonly _tag: "UnexpectedKey"
     /**
      * The schema that caused the issue.
      */
-    ast: SchemaAST.AST,
-    /**
-     * The present input associated with the issue. It is retained only when
-     * `options.reportInput` is `true`.
-     */
-    input?: unknown,
-    /**
-     * The effective parse options controlling input retention.
-     */
-    options?: SchemaAST.ParseOptions
-  ) {
-    super(input, options)
-    this.ast = ast
+    readonly ast: SchemaAST.AST
+    constructor(
+      /**
+       * The schema that caused the issue.
+       */
+      ast: SchemaAST.AST,
+      /**
+       * The present input associated with the issue. It is retained only when
+       * `options.reportInput` is `true`.
+       */
+      input?: unknown,
+      /**
+       * The effective parse options controlling input retention.
+       */
+      options?: SchemaAST.ParseOptions
+    ) {
+      super(input, options)
+      this.ast = ast
+    }
   }
-}
+)
 
 /**
  * Represents a schema issue that groups multiple child issues under a single schema node.
@@ -585,41 +601,44 @@ export const Composite: new(
   issues: readonly [Issue, ...Array<Issue>],
   input?: unknown,
   options?: SchemaAST.ParseOptions
-) => Composite = class extends IssueNodeImpl {
-  readonly _tag = "Composite"
-  /**
-   * The schema that caused the issue.
-   */
-  readonly ast: SchemaAST.AST
-  /**
-   * The issues that occurred.
-   */
-  readonly issues: readonly [Issue, ...Array<Issue>]
-
-  constructor(
+) => Composite = tagged(
+  "Composite",
+  class extends IssueNodeImpl {
+    declare readonly _tag: "Composite"
     /**
      * The schema that caused the issue.
      */
-    ast: SchemaAST.AST,
+    readonly ast: SchemaAST.AST
     /**
      * The issues that occurred.
      */
-    issues: readonly [Issue, ...Array<Issue>],
-    /**
-     * The present input associated with the issue. It is retained only when
-     * `options.reportInput` is `true`.
-     */
-    input?: unknown,
-    /**
-     * The effective parse options controlling input retention.
-     */
-    options?: SchemaAST.ParseOptions
-  ) {
-    super(input, options)
-    this.ast = ast
-    this.issues = issues
+    readonly issues: readonly [Issue, ...Array<Issue>]
+
+    constructor(
+      /**
+       * The schema that caused the issue.
+       */
+      ast: SchemaAST.AST,
+      /**
+       * The issues that occurred.
+       */
+      issues: readonly [Issue, ...Array<Issue>],
+      /**
+       * The present input associated with the issue. It is retained only when
+       * `options.reportInput` is `true`.
+       */
+      input?: unknown,
+      /**
+       * The effective parse options controlling input retention.
+       */
+      options?: SchemaAST.ParseOptions
+    ) {
+      super(input, options)
+      this.ast = ast
+      this.issues = issues
+    }
   }
-}
+)
 
 /**
  * Represents a schema issue produced when the runtime type of the input does not match the type
@@ -669,31 +688,34 @@ export const InvalidType: new(
   ast: SchemaAST.AST,
   input?: unknown,
   options?: SchemaAST.ParseOptions
-) => InvalidType = class extends IssueNodeImpl {
-  readonly _tag = "InvalidType"
-  /**
-   * The schema that caused the issue.
-   */
-  readonly ast: SchemaAST.AST
-  constructor(
+) => InvalidType = tagged(
+  "InvalidType",
+  class extends IssueNodeImpl {
+    declare readonly _tag: "InvalidType"
     /**
      * The schema that caused the issue.
      */
-    ast: SchemaAST.AST,
-    /**
-     * The present input associated with the issue. It is retained only when
-     * `options.reportInput` is `true`.
-     */
-    input?: unknown,
-    /**
-     * The effective parse options controlling input retention.
-     */
-    options?: SchemaAST.ParseOptions
-  ) {
-    super(input, options)
-    this.ast = ast
+    readonly ast: SchemaAST.AST
+    constructor(
+      /**
+       * The schema that caused the issue.
+       */
+      ast: SchemaAST.AST,
+      /**
+       * The present input associated with the issue. It is retained only when
+       * `options.reportInput` is `true`.
+       */
+      input?: unknown,
+      /**
+       * The effective parse options controlling input retention.
+       */
+      options?: SchemaAST.ParseOptions
+    ) {
+      super(input, options)
+      this.ast = ast
+    }
   }
-}
+)
 
 /**
  * Represents a schema issue produced when the input has the correct type but its value violates a
@@ -748,32 +770,35 @@ export const InvalidValue: new(
   annotations?: Schema.Annotations.Issue | undefined,
   input?: unknown,
   options?: SchemaAST.ParseOptions
-) => InvalidValue = class extends IssueNodeImpl {
-  readonly _tag = "InvalidValue"
-  /**
-   * The metadata for the issue.
-   */
-  readonly annotations: Schema.Annotations.Issue | undefined
-
-  constructor(
+) => InvalidValue = tagged(
+  "InvalidValue",
+  class extends IssueNodeImpl {
+    declare readonly _tag: "InvalidValue"
     /**
      * The metadata for the issue.
      */
-    annotations?: Schema.Annotations.Issue | undefined,
-    /**
-     * The present input associated with the issue. It is retained only when
-     * `options.reportInput` is `true`.
-     */
-    input?: unknown,
-    /**
-     * The effective parse options controlling input retention.
-     */
-    options?: SchemaAST.ParseOptions
-  ) {
-    super(input, options)
-    this.annotations = annotations
+    readonly annotations: Schema.Annotations.Issue | undefined
+
+    constructor(
+      /**
+       * The metadata for the issue.
+       */
+      annotations?: Schema.Annotations.Issue | undefined,
+      /**
+       * The present input associated with the issue. It is retained only when
+       * `options.reportInput` is `true`.
+       */
+      input?: unknown,
+      /**
+       * The effective parse options controlling input retention.
+       */
+      options?: SchemaAST.ParseOptions
+    ) {
+      super(input, options)
+      this.annotations = annotations
+    }
   }
-}
+)
 
 /** @internal */
 export function makeCompositeAtKey(
@@ -840,32 +865,35 @@ export const Forbidden: new(
   annotations: Schema.Annotations.Issue | undefined,
   input?: unknown,
   options?: SchemaAST.ParseOptions
-) => Forbidden = class extends IssueNodeImpl {
-  readonly _tag = "Forbidden"
-  /**
-   * The metadata for the issue.
-   */
-  readonly annotations: Schema.Annotations.Issue | undefined
-
-  constructor(
+) => Forbidden = tagged(
+  "Forbidden",
+  class extends IssueNodeImpl {
+    declare readonly _tag: "Forbidden"
     /**
      * The metadata for the issue.
      */
-    annotations: Schema.Annotations.Issue | undefined,
-    /**
-     * The present input associated with the issue. It is retained only when
-     * `options.reportInput` is `true`.
-     */
-    input?: unknown,
-    /**
-     * The effective parse options controlling input retention.
-     */
-    options?: SchemaAST.ParseOptions
-  ) {
-    super(input, options)
-    this.annotations = annotations
+    readonly annotations: Schema.Annotations.Issue | undefined
+
+    constructor(
+      /**
+       * The metadata for the issue.
+       */
+      annotations: Schema.Annotations.Issue | undefined,
+      /**
+       * The present input associated with the issue. It is retained only when
+       * `options.reportInput` is `true`.
+       */
+      input?: unknown,
+      /**
+       * The effective parse options controlling input retention.
+       */
+      options?: SchemaAST.ParseOptions
+    ) {
+      super(input, options)
+      this.annotations = annotations
+    }
   }
-}
+)
 
 /**
  * Represents a schema issue produced when a value does not match *any* member of a union schema.
@@ -915,41 +943,44 @@ export const AnyOf: new(
   issues: ReadonlyArray<Issue>,
   input?: unknown,
   options?: SchemaAST.ParseOptions
-) => AnyOf = class extends IssueNodeImpl {
-  readonly _tag = "AnyOf"
-  /**
-   * The schema that caused the issue.
-   */
-  readonly ast: SchemaAST.Union
-  /**
-   * The issues that occurred.
-   */
-  readonly issues: ReadonlyArray<Issue>
-
-  constructor(
+) => AnyOf = tagged(
+  "AnyOf",
+  class extends IssueNodeImpl {
+    declare readonly _tag: "AnyOf"
     /**
      * The schema that caused the issue.
      */
-    ast: SchemaAST.Union,
+    readonly ast: SchemaAST.Union
     /**
      * The issues that occurred.
      */
-    issues: ReadonlyArray<Issue>,
-    /**
-     * The present input associated with the issue. It is retained only when
-     * `options.reportInput` is `true`.
-     */
-    input?: unknown,
-    /**
-     * The effective parse options controlling input retention.
-     */
-    options?: SchemaAST.ParseOptions
-  ) {
-    super(input, options)
-    this.ast = ast
-    this.issues = issues
+    readonly issues: ReadonlyArray<Issue>
+
+    constructor(
+      /**
+       * The schema that caused the issue.
+       */
+      ast: SchemaAST.Union,
+      /**
+       * The issues that occurred.
+       */
+      issues: ReadonlyArray<Issue>,
+      /**
+       * The present input associated with the issue. It is retained only when
+       * `options.reportInput` is `true`.
+       */
+      input?: unknown,
+      /**
+       * The effective parse options controlling input retention.
+       */
+      options?: SchemaAST.ParseOptions
+    ) {
+      super(input, options)
+      this.ast = ast
+      this.issues = issues
+    }
   }
-}
+)
 
 /**
  * Represents a schema issue produced when a value matches *multiple* members of a union that is
@@ -997,41 +1028,44 @@ export const OneOf: new(
   successes: ReadonlyArray<SchemaAST.AST>,
   input?: unknown,
   options?: SchemaAST.ParseOptions
-) => OneOf = class extends IssueNodeImpl {
-  readonly _tag = "OneOf"
-  /**
-   * The schema that caused the issue.
-   */
-  readonly ast: SchemaAST.Union
-  /**
-   * The schemas that were successful.
-   */
-  readonly successes: ReadonlyArray<SchemaAST.AST>
-
-  constructor(
+) => OneOf = tagged(
+  "OneOf",
+  class extends IssueNodeImpl {
+    declare readonly _tag: "OneOf"
     /**
      * The schema that caused the issue.
      */
-    ast: SchemaAST.Union,
+    readonly ast: SchemaAST.Union
     /**
      * The schemas that were successful.
      */
-    successes: ReadonlyArray<SchemaAST.AST>,
-    /**
-     * The present input associated with the issue. It is retained only when
-     * `options.reportInput` is `true`.
-     */
-    input?: unknown,
-    /**
-     * The effective parse options controlling input retention.
-     */
-    options?: SchemaAST.ParseOptions
-  ) {
-    super(input, options)
-    this.ast = ast
-    this.successes = successes
+    readonly successes: ReadonlyArray<SchemaAST.AST>
+
+    constructor(
+      /**
+       * The schema that caused the issue.
+       */
+      ast: SchemaAST.Union,
+      /**
+       * The schemas that were successful.
+       */
+      successes: ReadonlyArray<SchemaAST.AST>,
+      /**
+       * The present input associated with the issue. It is retained only when
+       * `options.reportInput` is `true`.
+       */
+      input?: unknown,
+      /**
+       * The effective parse options controlling input retention.
+       */
+      options?: SchemaAST.ParseOptions
+    ) {
+      super(input, options)
+      this.ast = ast
+      this.successes = successes
+    }
   }
-}
+)
 
 function makeFilterIssue(
   entry: Schema.FilterIssue,
