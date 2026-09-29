@@ -799,7 +799,7 @@ function structPayload(ast: SchemaAST.Objects, resolver: Resolver): StructPayloa
     objects: ast,
     resolver,
     keys: ast.propertySignatures.map((ps) => ps.name),
-    expected: new Set(ast.propertySignatures.map((ps) => typeof ps.name === "number" ? String(ps.name) : ps.name)),
+    expected: undefined,
     children: undefined,
     leaves: []
   }
@@ -878,9 +878,13 @@ interface StructPayload {
   readonly objects: SchemaAST.Objects
   readonly resolver: Resolver
   readonly keys: ReadonlyArray<PropertyKey>
-  readonly expected: ReadonlySet<PropertyKey>
+  expected: ReadonlySet<PropertyKey> | undefined
   children: ReadonlyArray<Node<unknown>> | undefined
   leaves: ReadonlyArray<string | undefined>
+}
+
+function expectedKeys(p: StructPayload): ReadonlySet<PropertyKey> {
+  return p.expected = new Set(p.keys.map((key) => typeof key === "number" ? String(key) : key))
 }
 
 function properties(p: StructPayload): ReadonlyArray<Node<unknown>> {
@@ -931,7 +935,7 @@ function structEnter(run: Run, node: Node<StructPayload>, input: unknown, depth:
     if (!isStruct(input)) return invalidType(run, node, input)
     properties(node.p)
     if (options.onExcessProperty === "error") {
-      const expected = node.p.expected
+      const expected = node.p.expected ?? expectedKeys(node.p)
       const keys = Reflect.ownKeys(input)
       for (let i = 0; i < keys.length; i++) {
         const key = keys[i]
