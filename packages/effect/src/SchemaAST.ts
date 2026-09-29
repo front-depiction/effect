@@ -2596,10 +2596,15 @@ export function struct<Fields extends Schema.Struct.Fields>(
   checks: Checks | undefined,
   annotations?: Schema.Annotations.Annotations
 ): Objects {
+  const propertySignatures = Object.getOwnPropertyNames(fields).map((key) =>
+    new PropertySignature(key, fields[key].ast)
+  )
+  const symbols = Object.getOwnPropertySymbols(fields)
+  for (let i = 0; i < symbols.length; i++) {
+    propertySignatures.push(new PropertySignature(symbols[i], fields[symbols[i]].ast))
+  }
   return new Objects(
-    Reflect.ownKeys(fields).map((key) => {
-      return new PropertySignature(key, fields[key].ast)
-    }),
+    propertySignatures,
     [],
     annotations,
     checks

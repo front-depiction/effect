@@ -53,4 +53,12 @@ describe("Schema kinds", () => {
     SchemaParser.decodeUnknownSync(A)({ a: "x" })
     assert.strictEqual(calls, 1)
   })
+
+  it("a struct keeps every own field key in own-key order", () => {
+    const sym = Symbol("s")
+    const fields = { b: Schema.String, 2: Schema.String, a: Schema.String, [sym]: Schema.String, 1: Schema.String }
+    Object.defineProperty(fields, "hidden", { value: Schema.String, enumerable: false })
+    const ast = Schema.Struct(fields).ast
+    assert.deepStrictEqual(ast.propertySignatures.map((ps) => ps.name), Reflect.ownKeys(fields))
+  })
 })
