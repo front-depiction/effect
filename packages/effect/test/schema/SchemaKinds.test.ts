@@ -24,4 +24,33 @@ describe("Schema kinds", () => {
     const literals = Schema.Literals(["a", "b"]).annotate({ title: "t" })
     assert.deepStrictEqual(literals.pick(["a"]).literals, ["a"])
   })
+
+  it("a Class copies a __proto__ field as its own data", () => {
+    class A extends Schema.Class<A>("A")({ ["__proto__"]: Schema.String, a: Schema.Number }) {}
+    const decoded = SchemaParser.decodeUnknownSync(A)(JSON.parse(`{"__proto__":"x","a":1}`))
+    assert.isTrue(Object.hasOwn(decoded, "__proto__"))
+    assert.strictEqual(Object.getPrototypeOf(decoded), A.prototype)
+    assert.deepStrictEqual(Object.keys(new A(JSON.parse(`{"__proto__":"y","a":2}`))), ["__proto__", "a"])
+  })
+
+  it("a user constructor in an extend chain receives the forwarded options", () => {
+    const seen: Array<unknown> = []
+    class A extends Schema.Class<A>("A")({ a: Schema.String }) {
+      constructor(input: { readonly a: string }, options?: Schema.MakeOptions) {
+        seen.push(options?.disableChecks)
+        super(input, options)
+      }
+    }
+    class B extends A.extend<B>("B")({ b: Schema.Number }) {}
+    const b = new B({ a: "a", b: 1 })
+    assert.deepStrictEqual(seen, [true])
+    assert.deepStrictEqual({ ...b }, { a: "a", b: 1 })
+  })
+
+  it("decoding a Class runs its constructor once without validating the struct again", () => {
+    let calls = 0
+    class A extends Schema.Class<A>("A")({ a: Schema.String.check(Schema.makeFilter(() => (calls++, true))) }) {}
+    SchemaParser.decodeUnknownSync(A)({ a: "x" })
+    assert.strictEqual(calls, 1)
+  })
 })

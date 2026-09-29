@@ -42,6 +42,7 @@ import * as InternalGraph from "./internal/graph.ts"
 import * as InternalRecord from "./internal/record.ts"
 import * as InternalAnnotations from "./internal/schema/annotations.ts"
 import * as InternalMake from "./internal/schema/make.ts"
+import * as InternalParser from "./internal/schema/parser.ts"
 import * as InternalStandardSchema from "./internal/schema/standardSchema.ts"
 import * as InternalToCodec from "./internal/schema/toCodec.ts"
 import * as InternalToDifferJsonPatch from "./internal/schema/toDifferJsonPatch.ts"
@@ -136,7 +137,6 @@ export interface MakeOptions {
 
   /** @internal */
   readonly "~payload"?: {
-    readonly token: unknown
     readonly value: unknown
   }
 }
@@ -14743,7 +14743,25 @@ type MissingSelfGeneric<Usage extends string> =
 
 const immerable: unique symbol = globalThis.Symbol.for("immer-draftable") as any
 
-const payloadToken = {}
+class ClassPayload {
+  readonly "~payload": ClassPayload
+  readonly value: object
+  constructor(value: object) {
+    this["~payload"] = this
+    this.value = value
+  }
+}
+
+function assignValue(self: object, value: object): void {
+  if (Object.hasOwn(value, "__proto__")) InternalRecord.assignProperties(self, value)
+  else Object.assign(self, value)
+}
+
+function forwardOptions(inherited: object, options: MakeOptions | undefined, value: object): MakeOptions {
+  return Object.hasOwn(inherited, TypeId)
+    ? new ClassPayload(value)
+    : { ...options, disableChecks: true, "~payload": new ClassPayload(value) }
+}
 
 function makeClass<
   Self,
@@ -14758,15 +14776,17 @@ function makeClass<
 ): any {
   const getClassSchema = getClassSchemaFactory(struct, identifier, annotations)
   const ClassTypeId = getClassTypeId(identifier) // HMR support
+  const copies = Inherited === Data.Class
+  const forwards = !copies && Inherited !== core.Error
 
   const out = class extends Inherited {
-    constructor(...[input, options]: ReadonlyArray<any>) {
-      const internalOptions = options as MakeOptions | undefined
-      const payload = internalOptions?.["~payload"]
-      const value = payload?.token === payloadToken
-        ? payload.value
-        : struct.make(input ?? {}, options)
-      super(value, { ...options, disableChecks: true, "~payload": { token: payloadToken, value } })
+    constructor(...args: ReadonlyArray<any>) {
+      const input = args[0]
+      const options: MakeOptions | undefined = args[1]
+      const payload = options?.["~payload"]
+      const value = payload instanceof ClassPayload ? payload.value : struct.make(input ?? {}, options)
+      super(copies ? undefined : value, forwards ? forwardOptions(Inherited, options, value) : undefined)
+      if (copies) assignValue(this, value)
     }
 
     static readonly [TypeId] = TypeId
@@ -14845,14 +14865,7 @@ function makeClass<
 
 function getClassTransformation(self: new(...args: ReadonlyArray<any>) => any) {
   return new SchemaTransformation.Transformation<any, any, never, never>(
-    SchemaGetter.transform((input) =>
-      new self(input, {
-        "~payload": {
-          token: payloadToken,
-          value: input
-        }
-      })
-    ),
+    SchemaGetter.transform((input) => new self(input, new ClassPayload(input))),
     SchemaGetter.passthrough()
   )
 }
@@ -14882,7 +14895,7 @@ function getClassSchemaFactory<S extends Constraint>(
         [from.ast],
         () => (input, ast, options) => {
           return isClassValue(input) ?
-            Effect.succeed(input) :
+            InternalParser.sameExit :
             Effect.fail(new SchemaIssue.InvalidType(ast, input, options))
         },
         {
