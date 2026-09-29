@@ -61,4 +61,17 @@ describe("Schema kinds", () => {
     const ast = Schema.Struct(fields).ast
     assert.deepStrictEqual(ast.propertySignatures.map((ps) => ps.name), Reflect.ownKeys(fields))
   })
+
+  it("a Class accepts an already validated value only for the class it was issued to", () => {
+    let captured: Schema.MakeOptions | undefined
+    class A extends Schema.Class<A>("A")({ a: Schema.String }) {
+      constructor(input: { readonly a: string }, options?: Schema.MakeOptions) {
+        captured ??= options
+        super(input, options)
+      }
+    }
+    class B extends Schema.Class<B>("B")({ b: Schema.Number }) {}
+    SchemaParser.decodeUnknownSync(A)({ a: "x" })
+    assert.deepStrictEqual({ ...new B({ b: 1 }, captured) }, { b: 1 })
+  })
 })

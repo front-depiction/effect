@@ -14746,9 +14746,11 @@ const immerable: unique symbol = globalThis.Symbol.for("immer-draftable") as any
 class ClassPayload {
   readonly "~payload": ClassPayload
   readonly value: object
-  constructor(value: object) {
+  readonly target: unknown
+  constructor(value: object, target: unknown) {
     this["~payload"] = this
     this.value = value
+    this.target = target
   }
 }
 
@@ -14757,10 +14759,15 @@ function assignValue(self: object, value: object): void {
   else Object.assign(self, value)
 }
 
-function forwardOptions(inherited: object, options: MakeOptions | undefined, value: object): MakeOptions {
+function forwardOptions(
+  inherited: object,
+  options: MakeOptions | undefined,
+  value: object,
+  target: unknown
+): MakeOptions {
   return Object.hasOwn(inherited, TypeId)
-    ? new ClassPayload(value)
-    : { ...options, disableChecks: true, "~payload": new ClassPayload(value) }
+    ? new ClassPayload(value, target)
+    : { ...options, disableChecks: true, "~payload": new ClassPayload(value, target) }
 }
 
 function makeClass<
@@ -14784,8 +14791,10 @@ function makeClass<
       const input = args[0]
       const options: MakeOptions | undefined = args[1]
       const payload = options?.["~payload"]
-      const value = payload instanceof ClassPayload ? payload.value : struct.make(input ?? {}, options)
-      super(copies ? undefined : value, forwards ? forwardOptions(Inherited, options, value) : undefined)
+      const value = payload instanceof ClassPayload && payload.target === new.target
+        ? payload.value
+        : struct.make(input ?? {}, options)
+      super(copies ? undefined : value, forwards ? forwardOptions(Inherited, options, value, new.target) : undefined)
       if (copies) assignValue(this, value)
     }
 
@@ -14865,7 +14874,7 @@ function makeClass<
 
 function getClassTransformation(self: new(...args: ReadonlyArray<any>) => any) {
   return new SchemaTransformation.Transformation<any, any, never, never>(
-    SchemaGetter.transform((input) => new self(input, new ClassPayload(input))),
+    SchemaGetter.transform((input) => new self(input, new ClassPayload(input, self))),
     SchemaGetter.passthrough()
   )
 }
