@@ -505,6 +505,15 @@ function restart(k: Snapshot): Pending {
   return release(run, settle(run, base, value, k.options))
 }
 
+function enter(run: Run, node: Node<unknown>, input: unknown, options: SchemaAST.ParseOptions, root: boolean): unknown {
+  if (root) run.planFailure = unplanned
+  const previous = run.options
+  run.options = options
+  const value = start(run, node, input, run.sp, previous, root)
+  run.options = previous
+  return value
+}
+
 /** @internal */
 export function decode(
   node: Node<unknown>,
@@ -513,12 +522,8 @@ export function decode(
   root: boolean
 ): Pending {
   const run = machine
-  if (root) run.planFailure = unplanned
-  const previous = run.options
-  run.options = options
   const base = run.sp
-  const value = start(run, node, input, base, previous, root)
-  run.options = previous
+  const value = enter(run, node, input, options, root)
   const result = run.result
   if (result !== undefined) {
     run.result = undefined
@@ -536,12 +541,8 @@ export const halted = Symbol()
 /** @internal */
 export function evaluate(node: Node<unknown>, input: unknown, options: SchemaAST.ParseOptions, root: boolean): unknown {
   const run = machine
-  if (root) run.planFailure = unplanned
-  const previous = run.options
-  run.options = options
   const base = run.sp
-  const value = start(run, node, input, base, previous, root)
-  run.options = previous
+  const value = enter(run, node, input, options, root)
   if (value !== run) return value
   run.halted = release(run, settle(run, base, value, options))
   return halted
