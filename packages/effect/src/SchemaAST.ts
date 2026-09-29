@@ -2399,6 +2399,10 @@ function isIndexSignatureParameter(ast: AST): ast is IndexSignatureParameter {
 export interface IndexSignature {
   readonly parameter: IndexSignatureParameter
   readonly type: AST
+  /** @internal */
+  rebuild(parameter: AST, type: AST): IndexSignature
+  /** @internal */
+  getRecordNode(ast: Objects, resolver: Machine.Resolver): Machine.Node<unknown>
 }
 
 /**
@@ -2423,6 +2427,14 @@ export const IndexSignature: new(parameter: AST, type: AST) => IndexSignature = 
     if (isOptional(type) && !containsUndefined(type)) {
       throw new Error("Cannot use `Schema.optionalKey` with index signatures, use `Schema.optional` instead.")
     }
+  }
+  /** @internal */
+  rebuild(parameter: AST, type: AST): IndexSignature {
+    return new IndexSignature(parameter, type)
+  }
+  /** @internal */
+  getRecordNode(ast: Objects, resolver: Machine.Resolver): Machine.Node<unknown> {
+    return Machine.recordNode(ast, resolver, recordSupport)
   }
 }
 
@@ -2520,8 +2532,9 @@ export const Objects: new(
   }
   /** @internal */
   override getParser(resolver: Machine.Resolver): Machine.Node<unknown> {
-    return this.indexSignatures.length > 0
-      ? Machine.recordNode(this, resolver, recordSupport)
+    const indexSignatures = this.indexSignatures
+    return indexSignatures.length > 0
+      ? indexSignatures[0].getRecordNode(this, resolver)
       : Machine.objectsNode(this, resolver)
   }
   private _rebuild(
@@ -2540,7 +2553,7 @@ export const Objects: new(
       const t = recur(is.type)
       return p === is.parameter && t === is.type
         ? is
-        : new IndexSignature(p, t)
+        : is.rebuild(p, t)
     })
 
     return props === this.propertySignatures && indexes === this.indexSignatures && checks === this.checks &&
