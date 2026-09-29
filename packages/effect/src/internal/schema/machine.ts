@@ -543,6 +543,7 @@ export function evaluate(node: Node<unknown>, input: unknown, options: SchemaAST
   const run = machine
   const base = run.sp
   const value = enter(run, node, input, options, root)
+  run.result = undefined
   if (value !== run) return value
   run.halted = release(run, settle(run, base, value, options))
   return halted

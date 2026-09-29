@@ -1162,7 +1162,6 @@ function makeConstructorSync<T, E>(
   ast: SchemaAST.AST
 ): (input: E, options?: Schema.MakeOptions) => T {
   let entry: CompilerRegistry.Entry | undefined
-  let parser: Parser | undefined
   return (input, options) => {
     entry ??= CompilerRegistry.resolve(ast)
     const parseOptions = options?.disableChecks
@@ -1179,16 +1178,12 @@ function makeConstructorSync<T, E>(
       }
       if (output !== CompilerRegistry.invalid && output !== InternalParser.missing) return output as T
     }
-    if (entry.resolve === undefined) {
-      const value = Machine.evaluate(entry.makeNode, input, parseOptions, false)
-      if (value !== Machine.halted && value !== InternalParser.missing) return value as T
-      return runSync(
-        parserResult<T, never>(value === Machine.halted ? Machine.takeHalted() : InternalParser.missingExit, input),
-        "Constructor adapter can only throw schema issues"
-      )
-    }
-    const result = (parser ??= entry.makeEffect)(input, parseOptions)
-    return runSync(parserResult<T, never>(result, input), "Constructor adapter can only throw schema issues")
+    const value = Machine.evaluate(entry.makeNode, input, parseOptions, false)
+    if (value !== Machine.halted && value !== InternalParser.missing) return value as T
+    return runSync(
+      parserResult<T, never>(value === Machine.halted ? Machine.takeHalted() : InternalParser.missingExit, input),
+      "Constructor adapter can only throw schema issues"
+    )
   }
 }
 
