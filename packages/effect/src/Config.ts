@@ -674,7 +674,7 @@ const toConfigCursorAST = memoize((root: SchemaAST.AST): SchemaAST.AST => {
     seen.add(ast)
     switch (ast._tag) {
       case "Objects": {
-        const matchesIndex = ast.indexSignatures.map((is) => is.keyGuard())
+        const matchesIndex = ast.indexSignatures.map((is) => SchemaParser._is(is.parameter))
         const materialize = Effect.fnUntraced(function*(cursor: ConfigCursor) {
           if (cursor.node?._tag !== "Record") {
             return undefined

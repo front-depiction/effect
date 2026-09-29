@@ -26,7 +26,6 @@ import * as Result from "./Result.ts"
 import type * as Schema from "./Schema.ts"
 import * as SchemaGetter from "./SchemaGetter.ts"
 import * as SchemaIssue from "./SchemaIssue.ts"
-import * as SchemaParser from "./SchemaParser.ts"
 import * as SchemaTransformation from "./SchemaTransformation.ts"
 import type * as Types from "./Types.ts"
 
@@ -2461,8 +2460,6 @@ export interface IndexSignature {
   rebuild(parameter: AST, type: AST): IndexSignature
   /** @internal */
   getRecordNode(ast: Objects, resolver: Machine.Resolver): Machine.Node<unknown>
-  /** @internal */
-  keyGuard(): (key: unknown) => boolean
 }
 
 /**
@@ -2495,10 +2492,6 @@ export const IndexSignature: new(parameter: AST, type: AST) => IndexSignature = 
   /** @internal */
   getRecordNode(ast: Objects, resolver: Machine.Resolver): Machine.Node<unknown> {
     return Machine.recordNode(ast, resolver, recordSupport)
-  }
-  /** @internal */
-  keyGuard(): (key: unknown) => boolean {
-    return SchemaParser._is(this.parameter)
   }
 }
 
