@@ -221,20 +221,6 @@ export function lazyParser(
   return (input, options) => (parser ??= entry[operation])(input, options)
 }
 
-const guardParsers = new WeakMap<Entry, Parser>()
-
-/** @internal */
-export function guardParser(ast: SchemaAST.AST): Parser {
-  const entry = resolve(ast)
-  if (entry.resolve !== undefined) return entry.parser
-  let parser = guardParsers.get(entry)
-  if (parser === undefined) {
-    parser = (input, options) => Machine.guard(entry.node, input, options)
-    guardParsers.set(entry, parser)
-  }
-  return parser
-}
-
 /** @internal */
 export function resolve(ast: SchemaAST.AST): Entry {
   const cached = cache.get(ast)

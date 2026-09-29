@@ -125,6 +125,7 @@ class Run {
   pending: Pending = idle
   result: Exit.Exit<unknown, Issue> | undefined = undefined
   options: SchemaAST.ParseOptions = {}
+  halted: Pending = idle
   readonly stack: Array<AnyFrame> = []
   sp = 0
 }
@@ -525,8 +526,39 @@ export function decode(
 }
 
 /** @internal */
-export function guard(node: Node<unknown>, input: unknown, options: SchemaAST.ParseOptions): Pending {
-  return decode(guardOf(node), input, options, true)
+export const halted = Symbol()
+
+/** @internal */
+export function evaluate(node: Node<unknown>, input: unknown, options: SchemaAST.ParseOptions, root: boolean): unknown {
+  const run = machine
+  if (root) run.planFailure = unplanned
+  const previous = run.options
+  run.options = options
+  const base = run.sp
+  const value = start(run, node, input, base, previous, root)
+  run.options = previous
+  if (value !== run) return value
+  run.halted = release(run, settle(run, base, value, options))
+  return halted
+}
+
+/** @internal */
+export function hold(pending: Pending): typeof halted {
+  machine.halted = pending
+  return halted
+}
+
+/** @internal */
+export function takeHalted(): Pending {
+  const run = machine
+  const pending = run.halted
+  run.halted = idle
+  return pending
+}
+
+/** @internal */
+export function test(node: Node<unknown>, input: unknown, options: SchemaAST.ParseOptions): unknown {
+  return evaluate(guardOf(node), input, options, true)
 }
 
 const identity = <O>(out: O): O => out
