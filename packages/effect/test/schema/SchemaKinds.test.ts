@@ -1,5 +1,5 @@
 import { assert, describe, it } from "@effect/vitest"
-import { Exit, Schema, SchemaParser } from "effect"
+import { Effect, Exit, Schema, SchemaGetter, SchemaParser } from "effect"
 
 describe("Schema kinds", () => {
   it("Literal.transform keeps the checks of its receiver", () => {
@@ -86,4 +86,28 @@ describe("Schema kinds", () => {
       assert.isTrue(issue._tag === "Fail" && issue.error._tag === "Composite" && issue.error.issues.length === 2)
     }
   })
+
+  it.effect("a new run of a suspended decode observes its input again", () =>
+    Effect.gen(function*() {
+      let reads = 0
+      const input = {
+        get a() {
+          reads++
+          return "a"
+        },
+        b: "b"
+      }
+      const slow = Schema.String.pipe(
+        Schema.decodeTo(Schema.String, {
+          decode: SchemaGetter.transformEffect((s: string) => Effect.suspend(() => Effect.succeed(s))),
+          encode: SchemaGetter.transform((s: string) => s)
+        })
+      )
+      const decode = SchemaParser.decodeUnknownEffect(Schema.Struct({ a: Schema.String, b: slow }))(input)
+      yield* decode
+      const afterFirst = reads
+      yield* decode
+      assert.strictEqual(afterFirst, 1)
+      assert.strictEqual(reads, 2)
+    }))
 })

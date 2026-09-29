@@ -40,7 +40,6 @@ const SUSPEND = 3
 const DESCEND = 4
 
 const CATCH = 1
-const RESTART = 2
 
 const idle: Pending = exitSucceed(undefined)
 const unplanned = Symbol()
@@ -401,17 +400,24 @@ function start(
 
 interface Snapshot {
   readonly frames: ReadonlyArray<AnyFrame>
-  readonly restart: number
   readonly options: SchemaAST.ParseOptions
   readonly pending: Pending
+  readonly node: Node<unknown> | undefined
+  readonly input: unknown
+  readonly root: boolean
 }
 
-function snapshot(run: Run, base: number, options: SchemaAST.ParseOptions): Snapshot {
+function snapshot(
+  run: Run,
+  base: number,
+  options: SchemaAST.ParseOptions,
+  node: Node<unknown> | undefined,
+  input: unknown,
+  root: boolean
+): Snapshot {
   const frames: Array<AnyFrame> = []
-  let restart = -1
   for (let k = base; k < run.sp; k++) {
     const frame = run.stack[k]
-    if (restart < 0 && frame.flags & RESTART) restart = k - base
     const copy = new Frame(
       frame.kind,
       frame.node,
@@ -428,11 +434,11 @@ function snapshot(run: Run, base: number, options: SchemaAST.ParseOptions): Snap
     frames.push(copy)
   }
   popTo(run, base)
-  return { frames, restart, options, pending: run.pending }
+  return { frames, options, pending: run.pending, node, input, root }
 }
 
-function restore(run: Run, frames: ReadonlyArray<AnyFrame>, end: number): void {
-  for (let k = 0; k < end; k++) {
+function restore(run: Run, frames: ReadonlyArray<AnyFrame>): void {
+  for (let k = 0; k < frames.length; k++) {
     const frame = frames[k]
     spill(
       run,
@@ -452,7 +458,15 @@ function restore(run: Run, frames: ReadonlyArray<AnyFrame>, end: number): void {
   }
 }
 
-function settle(run: Run, base: number, result: unknown, options: SchemaAST.ParseOptions): Pending {
+function settle(
+  run: Run,
+  base: number,
+  result: unknown,
+  options: SchemaAST.ParseOptions,
+  node: Node<unknown> | undefined,
+  input: unknown,
+  root: boolean
+): Pending {
   if (result !== run) return exitSucceed(result)
   if (run.status !== SUSPEND) return failureExit(run)
   if (run.sp - base === 1) {
@@ -462,14 +476,15 @@ function settle(run: Run, base: number, result: unknown, options: SchemaAST.Pars
       return run.pending
     }
   }
-  return describe(snapshot(run, base, options))
+  return describe(snapshot(run, base, options, node, input, root))
 }
 
 function describe(k: Snapshot): Pending {
-  if (k.restart < 0) return flatMap(exitEffect(k.pending), (result) => continueAt(k, result))
+  const node = k.node
+  if (node === undefined) return flatMap(exitEffect(k.pending), (result) => continueAt(k, result))
   let first = true
   return suspend(() => {
-    if (!first) return restart(k)
+    if (!first) return decode(node, k.input, k.options, k.root)
     first = false
     return flatMap(exitEffect(k.pending), (result) => continueAt(k, result))
   })
@@ -480,30 +495,10 @@ function continueAt(k: Snapshot, result: Exit.Exit<unknown, Issue>): Pending {
   const previous = run.options
   run.options = k.options
   const base = run.sp
-  restore(run, k.frames, k.frames.length)
+  restore(run, k.frames)
   const value = drive(run, base, run.sp, deliver(run, result, undefined), previous, false)
   run.options = previous
-  return release(run, settle(run, base, value, k.options))
-}
-
-function restart(k: Snapshot): Pending {
-  const run = machine
-  const previous = run.options
-  run.options = k.options
-  const base = run.sp
-  restore(run, k.frames, k.restart)
-  const segment = run.sp
-  const frame = k.frames[k.restart]
-  const node = frame.node
-  let result: unknown
-  try {
-    result = node.kind.fold(run, node, frame.input, 0)
-  } catch (error) {
-    result = unwind(run, base, error, previous, false)
-  }
-  const value = drive(run, base, segment, result, previous, false)
-  run.options = previous
-  return release(run, settle(run, base, value, k.options))
+  return release(run, settle(run, base, value, k.options, k.node, k.input, k.root))
 }
 
 function enter(
@@ -543,7 +538,7 @@ export function decode(
   if (value !== run) {
     return value === input && input !== InternalParser.missing ? InternalParser.sameExit : exitSucceed(value)
   }
-  return release(run, settle(run, base, value, options))
+  return release(run, settle(run, base, value, options, node, input, root))
 }
 
 /** @internal */
@@ -556,7 +551,7 @@ export function evaluate(node: Node<unknown>, input: unknown, options: SchemaAST
   const value = enter(run, node, input, options, root, true)
   run.result = undefined
   if (value !== run) return value
-  run.halted = release(run, settle(run, base, value, options))
+  run.halted = release(run, settle(run, base, value, options, node, input, root))
   return halted
 }
 
@@ -578,10 +573,11 @@ export function takeHalted(): Pending {
 export function test(node: Node<unknown>, input: unknown, options: SchemaAST.ParseOptions): boolean | typeof halted {
   const run = machine
   const base = run.sp
-  const value = enter(run, guardOf(node), input, options, true, true)
+  const guarded = guardOf(node)
+  const value = enter(run, guarded, input, options, true, true)
   if (value !== run) return value !== InternalParser.missing
   if (run.status === ISSUE) return release(run, false)
-  run.halted = release(run, settle(run, base, value, options))
+  run.halted = release(run, settle(run, base, value, options, guarded, input, true))
   return halted
 }
 
@@ -965,7 +961,7 @@ function structEnter(run: Run, node: Node<StructPayload>, input: unknown, depth:
     return die(run, error)
   }
   if (!sequential(options)) return forkStruct(run, node, input, acc)
-  return structLoop(run, node, input, output ? {} : undefined, 0, acc, NONE, depth, CATCH | RESTART)
+  return structLoop(run, node, input, output ? {} : undefined, 0, acc, NONE, depth, CATCH)
 }
 
 function structLoop(
@@ -1040,7 +1036,7 @@ export function structResumer(
     }
     if (result === run) result = drive(run, base, base, result, previous, false)
     run.options = previous
-    return release(run, settle(run, base, result, options))
+    return release(run, settle(run, base, result, options, undefined, input, false))
   }
 }
 
@@ -1262,7 +1258,7 @@ function spillRecord(
   k2: unknown,
   acc: Issues
 ): Run {
-  spill(run, kind, node, input, out, i, j, k2, acc, CATCH | RESTART)
+  spill(run, kind, node, input, out, i, j, k2, acc, CATCH)
   const top = run.stack[run.sp - 1]
   top.keys = keys
   top.lists = lists
@@ -1401,7 +1397,7 @@ function join<P, S extends Accumulator<unknown>>(
 ): unknown {
   if (eff === undefined) return done(run, node, s)
   if (effectIsExit(eff)) return eff._tag === "Failure" ? failCause(run, eff.cause) : done(run, node, s)
-  spill(run, frame, node, s.input, s, 0, 0, undefined, undefined, CATCH | RESTART)
+  spill(run, frame, node, s.input, s, 0, 0, undefined, undefined, CATCH)
   return suspendOn(run, eff)
 }
 
@@ -1670,7 +1666,7 @@ function arrayEnter(run: Run, node: Node<ArrayPayload>, input: unknown, depth: n
     undefined,
     NONE,
     depth,
-    CATCH | RESTART
+    CATCH
   )
 }
 
